@@ -266,6 +266,9 @@
 .pcp-preview-scope.pcp-english .markdown-preview-view :is(th, td, li, blockquote) p { text-indent: 0 !important; }
 
 /* Reading paragraphs use the same spacing controls as Live Preview. */
+.pcp-script-status { cursor: pointer; }
+.pcp-script-status.pcp-has-script-issues { color: var(--text-warning); }
+.pcp-script-status:focus-visible { outline: 2px solid var(--interactive-accent); }
 .pcp-preview-scope.pcp-word-spacing .markdown-preview-view p {
   line-height: var(--pcp-body-line) !important;
   margin-block: var(--pcp-blank-gap) !important;

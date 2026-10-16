@@ -4,11 +4,16 @@ const fs = require('fs'), path = require('path'), vm = require('vm');
 
 async function fixture(text, options = {}) {
   const info = Symbol('editorInfo'), live = Symbol('livePreview');
+  const modals = [], notices = [];
+  function ui() {return {children:[],style:{},classList:{add(){},toggle(){}},setAttribute(){},setText(t){this.text=t;},
+    createEl(tag,spec={}){const child=ui();child.tag=tag;child.text=spec.text;this.children.push(child);return child;},
+    createDiv(spec){return this.createEl('div',spec);},appendText(t){this.text=t;}};}
+  class Modal {constructor(){this.modalEl=ui();this.contentEl=ui();modals.push(this);}open(){}close(){this.closed=true;}}
   class Plugin {
     async loadData() { return {citations: false, indentParagraphs: false, ...options.settings}; }
     registerEditorExtension() {} registerEditorSuggest() {} addSettingTab() {} addCommand() {} registerEvent() {} registerInterval() {}
     registerDomEvent() {}
-    addStatusBarItem() { return {classList: {add(){}}, setAttribute(){}}; }
+    addStatusBarItem() { return ui(); }
   }
   class WidgetType {}
   const doc = {
@@ -22,7 +27,7 @@ async function fixture(text, options = {}) {
     replace: spec => ({range: (from,to) => ({...spec,from,to})}),
     widget: spec => ({range: from => ({...spec,from,to:from})})};
   const mocks = {
-    obsidian: {Plugin,EditorSuggest:class{},PluginSettingTab:class{},editorInfoField:info,editorLivePreviewField:live,setIcon(){}},
+    obsidian: {Plugin,Modal,Notice:class{constructor(t){notices.push(t);}},EditorSuggest:class{},PluginSettingTab:class{},editorInfoField:info,editorLivePreviewField:live,setIcon(){}},
     '@codemirror/state': {StateField:{define: spec => spec},StateEffect:{define:()=>({})},EditorState:{languageData:{of:()=>({})}}},
     '@codemirror/view': {WidgetType,Decoration:decorations,EditorView:{decorations:{from(){}}}},
     './core': require('../src/core')
@@ -39,12 +44,44 @@ async function fixture(text, options = {}) {
     doc:{toString:()=>text,lineAt:()=>({from:0,to:text.length})},
     selection: options.selection || {ranges:[]}};
   const ranges = plugin.field.create(state), view={dom:{ownerDocument:doc},requestMeasure(){}};
-  return {ranges,view,plugin};
+  return {ranges,view,plugin,modals,notices};
 }
 const indentOffsets = ranges =>
   // Array.from crosses the VM realm boundary so deepStrictEqual sees a host array.
   Array.from(ranges.filter(r => r.class === 'pcp-paragraph-start').map(r => r.from)).sort((a,b)=>a-b);
 function tags(element, tag) { return (element.tagName===tag?1:0)+(element.children||[]).reduce((n,c)=>n+tags(c,tag),0); }
+
+test('fake script status follows edits, setting and active view; preview repairs in one transaction', async()=>{
+  const {plugin}=await fixture('CO₂ R²');
+  let text='CO₂ R²', calls=0;
+  const editor={getValue:()=>text,cm:{dispatch({changes}){
+    calls++;
+    for(const c of Array.from(changes).reverse())text=text.slice(0,c.from)+c.insert+text.slice(c.to??c.from);
+  }}};
+  const source={file:{path:'note.md'},editor};
+  plugin.updateBlankStatus(source);
+  assert.match(plugin.scriptStatus.text,/2 处/);
+  plugin.settings.fakeScriptWarnings=false;plugin.updateBlankStatus(source);
+  assert.equal(plugin.scriptStatus.style.display,'none');
+  const modal=plugin.fixFakeScripts(source);
+  const buttons=[];const walk=e=>{if(e.tag==='button')buttons.push(e);e.children.forEach(walk);};walk(modal.contentEl);
+  assert.equal(calls,0);
+  buttons.find(b=>b.text==='全部修复').onclick();
+  assert.equal(calls,1);assert(modal.closed);
+  assert(text.includes('CO<sub>2</sub> R<sup>2</sup>'));
+  assert(text.includes('date modified:'));
+});
+
+test('fake script repair refuses a stale preview after text changes or file switch', async()=>{
+  const {plugin,notices}=await fixture('CO₂');
+  let text='CO₂',calls=0;
+  const source={file:{path:'note.md'},editor:{getValue:()=>text,cm:{dispatch(){calls++;}}}};
+  const modal=plugin.fixFakeScripts(source);
+  const button=modal.contentEl.children.at(-1).children.find(b=>b.text==='全部修复');
+  text='changed CO₂';button.onclick();assert.equal(calls,0);
+  text='CO₂';source.file={path:'other.md'};button.onclick();assert.equal(calls,0);
+  assert.equal(notices.filter(n=>n.includes('笔记已变化')).length,2);
+});
 
 test('citation path bridge survives reference plugin reload and restores previous managers', async()=>{
   const {plugin}=await fixture('正文');

@@ -3,7 +3,7 @@ const {Plugin, PluginSettingTab, Setting, Notice, Modal, MarkdownView, EditorSug
   editorInfoField, editorLivePreviewField, sanitizeHTMLToDom, setIcon, renderMath, finishRenderMath, Platform, requestUrl} = require('obsidian');
 const {StateField, StateEffect, EditorState} = require('@codemirror/state');
 const {Decoration, EditorView, WidgetType} = require('@codemirror/view');
-const {scanDocument, imageInventory, citationMap, maskExamples, blankLineViolations, referenceItems, documentIssues, blankLineEdits} = (()=>{const module={exports:{}};
+const {scanDocument, imageInventory, citationMap, maskExamples, blankLineViolations, referenceItems, documentIssues, blankLineEdits, fakeScriptViolations, fakeScriptEdits} = (()=>{const module={exports:{}};
 'use strict';
 
 // Pure parser: offsets always refer to the original document.
@@ -262,7 +262,12 @@ function documentIssues(text, resolve = () => true) {
 
 function blankLineEdits(text, violations, timestamp) {
   const eol = text.includes('\r\n') ? '\r\n' : '\n';
-  const changes = violations.map(v => ({from: v.from, insert: eol}));
+  return timestampedEdits(text, violations.map(v => ({from: v.from, insert: eol})), timestamp);
+}
+
+function timestampedEdits(text, edits, timestamp) {
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const changes = [...edits];
   if (!changes.length) return changes;
   const fm = /^---\r?\n[\s\S]*?\r?\n---(?=\r?\n|$)/.exec(text);
   if (fm) {
@@ -273,7 +278,67 @@ function blankLineEdits(text, violations, timestamp) {
   return changes.sort((a, b) => a.from - b.from);
 }
 
-module.exports = {scanDocument, imageAt, imageInventory, maskExamples, citationMap, blankLineViolations, referenceItems, documentIssues, blankLineEdits};
+// Scan characters, never guess whether ordinary baseline numbers are scientific notation.
+// Keep offsets in the original document so previewed edits remain selective and undoable.
+function fakeScriptViolations(text) {
+  const blank = s => s.replace(/[^\r\n]/g, ' ');
+  let masked = maskExamples(text)
+    .replace(/(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, blank)
+    .replace(/<sup\b[^>]*>[\s\S]*?<\/sup>|<sub\b[^>]*>[\s\S]*?<\/sub>/gi, blank)
+    .replace(/\[\[[^\r\n]*?\]\]|\{[^{}\r\n]*\}|<[^>\r\n]*>/g, blank)
+    .replace(/\[[^\]\r\n]*@[^\]\r\n]*\]|@[^\s\[\]{}<>;,]+/g, blank)
+    .replace(/^ {0,3}\[[^\]\r\n]+\]:[^\r\n]*/gm, blank);
+  // Link/image destinations may contain nested parentheses; keep visible captions.
+  for (let i = 0; i < masked.length; i++) {
+    if (masked[i] !== ']' || masked[i+1] !== '(' || escaped(masked, i)) continue;
+    let end = i+2, depth = 1;
+    for (; end < masked.length && depth; end++) {
+      if (masked[end] === '\\') {end++; continue;}
+      if (masked[end] === '(') depth++;
+      if (masked[end] === ')') depth--;
+    }
+    masked = masked.slice(0,i+1) + blank(masked.slice(i+1,end)) + masked.slice(end);
+    i = end-1;
+  }
+  masked = masked.replace(/(?:https?:\/\/|obsidian:\/\/)[^\s<>]+/g, blank);
+  // Protect LaTeX math. This repair writes HTML only in Markdown prose.
+  for (let i = 0; i < masked.length; i++) {
+    let open, close;
+    if (masked[i] === '$' && !escaped(masked,i)) {open = masked[i+1] === '$' ? '$$' : '$'; close = open;}
+    else if (masked[i] === '\\' && !escaped(masked,i) && /[([]/.test(masked[i+1] || '')) {
+      open = masked.slice(i,i+2); close = open === '\\(' ? '\\)' : '\\]';
+    }
+    if (!open) continue;
+    let end = masked.indexOf(close,i+open.length);
+    while (end >= 0 && escaped(masked,end)) end = masked.indexOf(close,end+close.length);
+    if (end < 0) { if (open !== '$') end = masked.length; else continue; }
+    else end += close.length;
+    masked = masked.slice(0,i) + blank(masked.slice(i,end)) + masked.slice(end);
+    i = end-1;
+  }
+  const supers = '⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻᴬᴮᴰᴱᴳᴴᴵᴶᴷᴸᴹᴺᴼᴾᴿᵀᵁⱽᵂ',
+    subs = '₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₒₓₔₕₖₗₘₙₚₛₜᵢᵣᵤᵥᵦᵧᵨᵩᵪ';
+  const kind = c => supers.includes(c) ? 'sup' : subs.includes(c) ? 'sub' : null;
+  const issues = [];
+  let line = 0, lineStart = 0;
+  for (let i = 0; i < masked.length; i++) {
+    if (masked[i] === '\n') {line++; lineStart = i+1; continue;}
+    const tag = kind(masked[i]);
+    if (!tag) continue;
+    const from = i;
+    while (i+1 < masked.length && kind(masked[i+1]) === tag) i++;
+    const original = text.slice(from,i+1);
+    issues.push({from, to:i+1, line, column:from-lineStart, original,
+      replacement:`<${tag}>${original.normalize('NFKC')}</${tag}>`});
+  }
+  return issues;
+}
+
+function fakeScriptEdits(text, issues, timestamp) {
+  return timestampedEdits(text, issues.map(v => ({from:v.from,to:v.to,insert:v.replacement})), timestamp);
+}
+
+module.exports = {scanDocument, imageAt, imageInventory, maskExamples, citationMap, blankLineViolations, referenceItems, documentIssues, blankLineEdits, fakeScriptViolations, fakeScriptEdits};
 
 return module.exports;})();
 
@@ -283,7 +348,7 @@ const DEFAULTS = {prefix: '图', align: 'center', bold: false, showUnlabelled: t
   chineseFont: 'SimSun', latinFont: 'Times New Roman', punctuationSong: true, bodySize: 0, bodyLineHeight: 1.5,
   bodyThemeColor: true, bodyColor: '#222222', referenceColor: '#3498db', captionThemeColor: true, captionColorCustom: '#222222',
   paragraphGap: 10, indentSize: 2, captionScale: 0.875, captionLineHeight: 1.65, tableSize: 12, tableLineHeight: 1,
-  quietBlankWarnings: true, appearanceProfiles: {}, manuscriptLanguages: {}, languageAppearance: {}};
+  quietBlankWarnings: true, fakeScriptWarnings: true, appearanceProfiles: {}, manuscriptLanguages: {}, languageAppearance: {}};
 
 const APPEARANCE_KEYS = ['chineseFont','latinFont','punctuationSong','bodySize','bodyLineHeight','bodyThemeColor','bodyColor',
   'referenceColor','captionThemeColor','captionColorCustom','paragraphGap','indentSize','captionScale','captionLineHeight','tableSize','tableLineHeight',
@@ -896,6 +961,11 @@ class CaptionSettings extends PluginSettingTab {
       .addToggle(t => t.setValue(this.editSettings.optimizeTables).onChange(async value => {
         this.editSettings.optimizeTables = value; await save();
       }));
+    new Setting(el).setName('虚假上下标提醒').setDesc('检查正文、标题、表格和图注中的 Unicode 上下标字符。状态栏点击预览并选择修复为 HTML 上下标；不自动修改，不猜测普通数字，跳过代码、公式和链接地址。')
+      .addToggle(t => t.setValue(this.editSettings.fakeScriptWarnings).onChange(async value => {
+        this.editSettings.fakeScriptWarnings = value; await save();
+      }));
+    new Setting(el).setName('检查虚假上下标').addButton(b => b.setButtonText('检查与修复').onClick(() => this.plugin.fixFakeScripts()));
     new Setting(el).setName('显示无标签图片的图注').setDesc('无 {#fig:id} 的图片显示图注，但不参与编号。')
       .addToggle(t => t.setValue(this.editSettings.showUnlabelled).onChange(async value => {
         this.editSettings.showUnlabelled = value; await save();
@@ -937,6 +1007,13 @@ module.exports = class PaperCaptionPreview extends Plugin {
     this.referenceSuggest = new ReferenceSuggest(this.app);
     this.registerEditorSuggest(this.referenceSuggest);
     this.blankStatus = this.addStatusBarItem();
+    this.scriptStatus = this.addStatusBarItem();
+    this.scriptStatus.classList.add('pcp-script-status');
+    this.scriptStatus.setAttribute('role', 'button'); this.scriptStatus.setAttribute('tabindex', '0');
+    this.registerDomEvent(this.scriptStatus, 'click', () => this.fixFakeScripts(this.blankStatusView));
+    this.registerDomEvent(this.scriptStatus, 'keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {event.preventDefault(); this.fixFakeScripts(this.blankStatusView);}
+    });
     this.languageStatus=this.addStatusBarItem();
     this.languageStatus.classList.add('pcp-language-status');
     this.languageStatus.setAttribute('role','button');this.languageStatus.setAttribute('tabindex','0');
@@ -961,6 +1038,7 @@ module.exports = class PaperCaptionPreview extends Plugin {
       this.citations.requests.clear(); this.citations.scopedMaps.clear(); this.refresh();
     }});
     this.addCommand({id: 'fix-blank-lines', name: '补全缺失空行', callback: () => this.fixBlankLines()});
+    this.addCommand({id: 'fix-fake-scripts', name: '检查并修复虚假上下标', callback: () => this.fixFakeScripts()});
     this.addCommand({id: 'diagnose-captions', name: '检查当前笔记图注', callback: () => this.diagnose()});
     this.addCommand({id: 'figure-navigation', name: '图表与公式导航', callback: () => this.openNavigation()});
     this.addRibbonIcon?.('list-tree', '图表与公式导航', () => this.openNavigation());
@@ -1005,6 +1083,16 @@ module.exports = class PaperCaptionPreview extends Plugin {
     if (this.disposed || !this.blankStatus) return;
     const view = sourceView || this.markdownView();
     this.blankStatusView = view;
+    if (this.scriptStatus) {
+      this.scriptStatus.style.display = view?.file && view.editor && this.settings.fakeScriptWarnings ? '' : 'none';
+      if (view?.file && view.editor && this.settings.fakeScriptWarnings) {
+        const count = fakeScriptViolations(view.editor.getValue()).length;
+        this.scriptStatus.setText(count ? `虚假上下标 ${count} 处 · 点击检查` : '上下标检查 ✓');
+        this.scriptStatus.classList.toggle('pcp-has-script-issues', count > 0);
+        this.scriptStatus.setAttribute('aria-label', count ? `发现 ${count} 处虚假上下标，打开修复预览` : '未发现 Unicode 虚假上下标');
+        this.scriptStatus.setAttribute('title', view.file.path + '\n检查 Unicode 上下标；不检查普通数字和公式，不会自动修改正文');
+      }
+    }
     this.languageStatusView=view;
     if(this.languageStatus) {
       this.languageStatus.style.display=view?.file&&view.editor?'':'none';
@@ -1363,6 +1451,44 @@ module.exports = class PaperCaptionPreview extends Plugin {
     controls.createEl('button', {text: '适应窗口'}).onclick = () => change(1);
     controls.createEl('button', {text: '关闭'}).onclick = () => modal.close();
     modal.open();
+  }
+  fixFakeScripts(sourceView) {
+    const view = sourceView || this.markdownView();
+    if (!view?.file || !view.editor) return new Notice('请先打开 Markdown 笔记。');
+    const editor = view.editor, text = editor.getValue(), path = view.file.path;
+    const issues = fakeScriptViolations(text);
+    if (!issues.length) return new Notice('未发现 Unicode 虚假上下标 ✓（不检查普通数字和公式）');
+    const modal = new Modal(this.app), selected = new Set(issues), lines = text.split('\n');
+    modal.modalEl.classList.add('pcp-review-modal');
+    modal.contentEl.createEl('h2', {text: '预览虚假上下标修复'});
+    modal.contentEl.createEl('p', {text: `发现 ${issues.length} 处。将字符转换为真正的 HTML 上下标；选择后修复并更新时间字段，可一次撤销。代码、公式、链接地址、citekey 和图表标签保持原样。`});
+    const apply = chosen => {
+      if (!chosen.length) return new Notice('请先选择需要修复的位置。');
+      if (view.file?.path !== path || editor.getValue() !== text) return new Notice('笔记已变化，请关闭后重新检查，避免改错位置。');
+      if (!editor.cm?.dispatch) return new Notice('当前编辑器不支持批量撤销，未修改笔记。');
+      const now = new Date(), pad = n => String(n).padStart(2, '0');
+      const timestamp = `${now.getFullYear()}.${pad(now.getMonth()+1)}.${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+      editor.cm.dispatch({changes: fakeScriptEdits(text, chosen, timestamp)});
+      this.updateBlankStatus(view);
+      modal.close(); new Notice(`已修复 ${chosen.length} 处虚假上下标（可 Ctrl+Z / Cmd+Z 撤销）`);
+    };
+    const list = modal.contentEl.createDiv({cls: 'pcp-review-list'});
+    for (const issue of issues) {
+      const row = list.createDiv({cls: 'pcp-review-row'}), label = row.createEl('label');
+      const check = label.createEl('input', {attr: {type: 'checkbox'}}); check.checked = true;
+      check.onchange = () => check.checked ? selected.add(issue) : selected.delete(issue);
+      label.appendText(` 第 ${issue.line+1} 行，第 ${issue.column+1} 列：${issue.original} → ${issue.replacement}`);
+      row.createEl('pre', {text: lines[issue.line]});
+      row.createEl('button', {text: '仅修此处'}).onclick = () => apply([issue]);
+      row.createEl('button', {text: '定位'}).onclick = () => {
+        modal.close(); editor.setSelection(editor.offsetToPos(issue.from), editor.offsetToPos(issue.to)); editor.focus();
+      };
+    }
+    const controls = modal.contentEl.createDiv({cls: 'pcp-zoom-controls'});
+    controls.createEl('button', {text: '修复所选'}).onclick = () => apply([...selected]);
+    controls.createEl('button', {text: '全部修复'}).onclick = () => apply(issues);
+    controls.createEl('button', {text: '取消'}).onclick = () => modal.close();
+    modal.open(); return modal;
   }
   fixBlankLines(sourceView, currentOnly = false) {
     const view = sourceView || this.markdownView();

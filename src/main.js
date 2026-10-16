@@ -3,7 +3,7 @@ const {Plugin, PluginSettingTab, Setting, Notice, Modal, MarkdownView, EditorSug
   editorInfoField, editorLivePreviewField, sanitizeHTMLToDom, setIcon, renderMath, finishRenderMath, Platform, requestUrl} = require('obsidian');
 const {StateField, StateEffect, EditorState} = require('@codemirror/state');
 const {Decoration, EditorView, WidgetType} = require('@codemirror/view');
-const {scanDocument, imageInventory, citationMap, maskExamples, blankLineViolations, referenceItems, documentIssues, blankLineEdits} = require('./core');
+const {scanDocument, imageInventory, citationMap, maskExamples, blankLineViolations, referenceItems, documentIssues, blankLineEdits, fakeScriptViolations, fakeScriptEdits} = require('./core');
 
 const refreshEffect = StateEffect.define();
 const DEFAULTS = {prefix: '图', align: 'center', bold: false, showUnlabelled: true, citations: true, centerImages: true, optimizeTables: true, indentParagraphs: true, compactBlankLines: true, blankLineWarnings: true, wordSpacing: true,
@@ -11,7 +11,7 @@ const DEFAULTS = {prefix: '图', align: 'center', bold: false, showUnlabelled: t
   chineseFont: 'SimSun', latinFont: 'Times New Roman', punctuationSong: true, bodySize: 0, bodyLineHeight: 1.5,
   bodyThemeColor: true, bodyColor: '#222222', referenceColor: '#3498db', captionThemeColor: true, captionColorCustom: '#222222',
   paragraphGap: 10, indentSize: 2, captionScale: 0.875, captionLineHeight: 1.65, tableSize: 12, tableLineHeight: 1,
-  quietBlankWarnings: true, appearanceProfiles: {}, manuscriptLanguages: {}, languageAppearance: {}};
+  quietBlankWarnings: true, fakeScriptWarnings: true, appearanceProfiles: {}, manuscriptLanguages: {}, languageAppearance: {}};
 
 const APPEARANCE_KEYS = ['chineseFont','latinFont','punctuationSong','bodySize','bodyLineHeight','bodyThemeColor','bodyColor',
   'referenceColor','captionThemeColor','captionColorCustom','paragraphGap','indentSize','captionScale','captionLineHeight','tableSize','tableLineHeight',
@@ -624,6 +624,11 @@ class CaptionSettings extends PluginSettingTab {
       .addToggle(t => t.setValue(this.editSettings.optimizeTables).onChange(async value => {
         this.editSettings.optimizeTables = value; await save();
       }));
+    new Setting(el).setName('虚假上下标提醒').setDesc('检查正文、标题、表格和图注中的 Unicode 上下标字符。状态栏点击预览并选择修复为 HTML 上下标；不自动修改，不猜测普通数字，跳过代码、公式和链接地址。')
+      .addToggle(t => t.setValue(this.editSettings.fakeScriptWarnings).onChange(async value => {
+        this.editSettings.fakeScriptWarnings = value; await save();
+      }));
+    new Setting(el).setName('检查虚假上下标').addButton(b => b.setButtonText('检查与修复').onClick(() => this.plugin.fixFakeScripts()));
     new Setting(el).setName('显示无标签图片的图注').setDesc('无 {#fig:id} 的图片显示图注，但不参与编号。')
       .addToggle(t => t.setValue(this.editSettings.showUnlabelled).onChange(async value => {
         this.editSettings.showUnlabelled = value; await save();
@@ -665,6 +670,13 @@ module.exports = class PaperCaptionPreview extends Plugin {
     this.referenceSuggest = new ReferenceSuggest(this.app);
     this.registerEditorSuggest(this.referenceSuggest);
     this.blankStatus = this.addStatusBarItem();
+    this.scriptStatus = this.addStatusBarItem();
+    this.scriptStatus.classList.add('pcp-script-status');
+    this.scriptStatus.setAttribute('role', 'button'); this.scriptStatus.setAttribute('tabindex', '0');
+    this.registerDomEvent(this.scriptStatus, 'click', () => this.fixFakeScripts(this.blankStatusView));
+    this.registerDomEvent(this.scriptStatus, 'keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {event.preventDefault(); this.fixFakeScripts(this.blankStatusView);}
+    });
     this.languageStatus=this.addStatusBarItem();
     this.languageStatus.classList.add('pcp-language-status');
     this.languageStatus.setAttribute('role','button');this.languageStatus.setAttribute('tabindex','0');
@@ -689,6 +701,7 @@ module.exports = class PaperCaptionPreview extends Plugin {
       this.citations.requests.clear(); this.citations.scopedMaps.clear(); this.refresh();
     }});
     this.addCommand({id: 'fix-blank-lines', name: '补全缺失空行', callback: () => this.fixBlankLines()});
+    this.addCommand({id: 'fix-fake-scripts', name: '检查并修复虚假上下标', callback: () => this.fixFakeScripts()});
     this.addCommand({id: 'diagnose-captions', name: '检查当前笔记图注', callback: () => this.diagnose()});
     this.addCommand({id: 'figure-navigation', name: '图表与公式导航', callback: () => this.openNavigation()});
     this.addRibbonIcon?.('list-tree', '图表与公式导航', () => this.openNavigation());
@@ -733,6 +746,16 @@ module.exports = class PaperCaptionPreview extends Plugin {
     if (this.disposed || !this.blankStatus) return;
     const view = sourceView || this.markdownView();
     this.blankStatusView = view;
+    if (this.scriptStatus) {
+      this.scriptStatus.style.display = view?.file && view.editor && this.settings.fakeScriptWarnings ? '' : 'none';
+      if (view?.file && view.editor && this.settings.fakeScriptWarnings) {
+        const count = fakeScriptViolations(view.editor.getValue()).length;
+        this.scriptStatus.setText(count ? `虚假上下标 ${count} 处 · 点击检查` : '上下标检查 ✓');
+        this.scriptStatus.classList.toggle('pcp-has-script-issues', count > 0);
+        this.scriptStatus.setAttribute('aria-label', count ? `发现 ${count} 处虚假上下标，打开修复预览` : '未发现 Unicode 虚假上下标');
+        this.scriptStatus.setAttribute('title', view.file.path + '\n检查 Unicode 上下标；不检查普通数字和公式，不会自动修改正文');
+      }
+    }
     this.languageStatusView=view;
     if(this.languageStatus) {
       this.languageStatus.style.display=view?.file&&view.editor?'':'none';
@@ -1091,6 +1114,44 @@ module.exports = class PaperCaptionPreview extends Plugin {
     controls.createEl('button', {text: '适应窗口'}).onclick = () => change(1);
     controls.createEl('button', {text: '关闭'}).onclick = () => modal.close();
     modal.open();
+  }
+  fixFakeScripts(sourceView) {
+    const view = sourceView || this.markdownView();
+    if (!view?.file || !view.editor) return new Notice('请先打开 Markdown 笔记。');
+    const editor = view.editor, text = editor.getValue(), path = view.file.path;
+    const issues = fakeScriptViolations(text);
+    if (!issues.length) return new Notice('未发现 Unicode 虚假上下标 ✓（不检查普通数字和公式）');
+    const modal = new Modal(this.app), selected = new Set(issues), lines = text.split('\n');
+    modal.modalEl.classList.add('pcp-review-modal');
+    modal.contentEl.createEl('h2', {text: '预览虚假上下标修复'});
+    modal.contentEl.createEl('p', {text: `发现 ${issues.length} 处。将字符转换为真正的 HTML 上下标；选择后修复并更新时间字段，可一次撤销。代码、公式、链接地址、citekey 和图表标签保持原样。`});
+    const apply = chosen => {
+      if (!chosen.length) return new Notice('请先选择需要修复的位置。');
+      if (view.file?.path !== path || editor.getValue() !== text) return new Notice('笔记已变化，请关闭后重新检查，避免改错位置。');
+      if (!editor.cm?.dispatch) return new Notice('当前编辑器不支持批量撤销，未修改笔记。');
+      const now = new Date(), pad = n => String(n).padStart(2, '0');
+      const timestamp = `${now.getFullYear()}.${pad(now.getMonth()+1)}.${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+      editor.cm.dispatch({changes: fakeScriptEdits(text, chosen, timestamp)});
+      this.updateBlankStatus(view);
+      modal.close(); new Notice(`已修复 ${chosen.length} 处虚假上下标（可 Ctrl+Z / Cmd+Z 撤销）`);
+    };
+    const list = modal.contentEl.createDiv({cls: 'pcp-review-list'});
+    for (const issue of issues) {
+      const row = list.createDiv({cls: 'pcp-review-row'}), label = row.createEl('label');
+      const check = label.createEl('input', {attr: {type: 'checkbox'}}); check.checked = true;
+      check.onchange = () => check.checked ? selected.add(issue) : selected.delete(issue);
+      label.appendText(` 第 ${issue.line+1} 行，第 ${issue.column+1} 列：${issue.original} → ${issue.replacement}`);
+      row.createEl('pre', {text: lines[issue.line]});
+      row.createEl('button', {text: '仅修此处'}).onclick = () => apply([issue]);
+      row.createEl('button', {text: '定位'}).onclick = () => {
+        modal.close(); editor.setSelection(editor.offsetToPos(issue.from), editor.offsetToPos(issue.to)); editor.focus();
+      };
+    }
+    const controls = modal.contentEl.createDiv({cls: 'pcp-zoom-controls'});
+    controls.createEl('button', {text: '修复所选'}).onclick = () => apply([...selected]);
+    controls.createEl('button', {text: '全部修复'}).onclick = () => apply(issues);
+    controls.createEl('button', {text: '取消'}).onclick = () => modal.close();
+    modal.open(); return modal;
   }
   fixBlankLines(sourceView, currentOnly = false) {
     const view = sourceView || this.markdownView();

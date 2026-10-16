@@ -256,7 +256,12 @@ function documentIssues(text, resolve = () => true) {
 
 function blankLineEdits(text, violations, timestamp) {
   const eol = text.includes('\r\n') ? '\r\n' : '\n';
-  const changes = violations.map(v => ({from: v.from, insert: eol}));
+  return timestampedEdits(text, violations.map(v => ({from: v.from, insert: eol})), timestamp);
+}
+
+function timestampedEdits(text, edits, timestamp) {
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const changes = [...edits];
   if (!changes.length) return changes;
   const fm = /^---\r?\n[\s\S]*?\r?\n---(?=\r?\n|$)/.exec(text);
   if (fm) {
@@ -267,4 +272,64 @@ function blankLineEdits(text, violations, timestamp) {
   return changes.sort((a, b) => a.from - b.from);
 }
 
-module.exports = {scanDocument, imageAt, imageInventory, maskExamples, citationMap, blankLineViolations, referenceItems, documentIssues, blankLineEdits};
+// Scan characters, never guess whether ordinary baseline numbers are scientific notation.
+// Keep offsets in the original document so previewed edits remain selective and undoable.
+function fakeScriptViolations(text) {
+  const blank = s => s.replace(/[^\r\n]/g, ' ');
+  let masked = maskExamples(text)
+    .replace(/(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, blank)
+    .replace(/<sup\b[^>]*>[\s\S]*?<\/sup>|<sub\b[^>]*>[\s\S]*?<\/sub>/gi, blank)
+    .replace(/\[\[[^\r\n]*?\]\]|\{[^{}\r\n]*\}|<[^>\r\n]*>/g, blank)
+    .replace(/\[[^\]\r\n]*@[^\]\r\n]*\]|@[^\s\[\]{}<>;,]+/g, blank)
+    .replace(/^ {0,3}\[[^\]\r\n]+\]:[^\r\n]*/gm, blank);
+  // Link/image destinations may contain nested parentheses; keep visible captions.
+  for (let i = 0; i < masked.length; i++) {
+    if (masked[i] !== ']' || masked[i+1] !== '(' || escaped(masked, i)) continue;
+    let end = i+2, depth = 1;
+    for (; end < masked.length && depth; end++) {
+      if (masked[end] === '\\') {end++; continue;}
+      if (masked[end] === '(') depth++;
+      if (masked[end] === ')') depth--;
+    }
+    masked = masked.slice(0,i+1) + blank(masked.slice(i+1,end)) + masked.slice(end);
+    i = end-1;
+  }
+  masked = masked.replace(/(?:https?:\/\/|obsidian:\/\/)[^\s<>]+/g, blank);
+  // Protect LaTeX math. This repair writes HTML only in Markdown prose.
+  for (let i = 0; i < masked.length; i++) {
+    let open, close;
+    if (masked[i] === '$' && !escaped(masked,i)) {open = masked[i+1] === '$' ? '$$' : '$'; close = open;}
+    else if (masked[i] === '\\' && !escaped(masked,i) && /[([]/.test(masked[i+1] || '')) {
+      open = masked.slice(i,i+2); close = open === '\\(' ? '\\)' : '\\]';
+    }
+    if (!open) continue;
+    let end = masked.indexOf(close,i+open.length);
+    while (end >= 0 && escaped(masked,end)) end = masked.indexOf(close,end+close.length);
+    if (end < 0) { if (open !== '$') end = masked.length; else continue; }
+    else end += close.length;
+    masked = masked.slice(0,i) + blank(masked.slice(i,end)) + masked.slice(end);
+    i = end-1;
+  }
+  const supers = '⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻᴬᴮᴰᴱᴳᴴᴵᴶᴷᴸᴹᴺᴼᴾᴿᵀᵁⱽᵂ',
+    subs = '₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₒₓₔₕₖₗₘₙₚₛₜᵢᵣᵤᵥᵦᵧᵨᵩᵪ';
+  const kind = c => supers.includes(c) ? 'sup' : subs.includes(c) ? 'sub' : null;
+  const issues = [];
+  let line = 0, lineStart = 0;
+  for (let i = 0; i < masked.length; i++) {
+    if (masked[i] === '\n') {line++; lineStart = i+1; continue;}
+    const tag = kind(masked[i]);
+    if (!tag) continue;
+    const from = i;
+    while (i+1 < masked.length && kind(masked[i+1]) === tag) i++;
+    const original = text.slice(from,i+1);
+    issues.push({from, to:i+1, line, column:from-lineStart, original,
+      replacement:`<${tag}>${original.normalize('NFKC')}</${tag}>`});
+  }
+  return issues;
+}
+
+function fakeScriptEdits(text, issues, timestamp) {
+  return timestampedEdits(text, issues.map(v => ({from:v.from,to:v.to,insert:v.replacement})), timestamp);
+}
+
+module.exports = {scanDocument, imageAt, imageInventory, maskExamples, citationMap, blankLineViolations, referenceItems, documentIssues, blankLineEdits, fakeScriptViolations, fakeScriptEdits};
