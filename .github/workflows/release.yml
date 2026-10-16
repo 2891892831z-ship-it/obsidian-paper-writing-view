@@ -22,4 +22,4 @@ jobs:
       - name: Publish plugin assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --title "论文写作视图 $GITHUB_REF_NAME" --notes-file RELEASE-NOTES.md main.js manifest.json styles.css versions.json dist/paper-caption-preview.zip
+        run: gh release create "$GITHUB_REF_NAME" --title "Paper Writing View $GITHUB_REF_NAME" --notes-file RELEASE-NOTES.md main.js manifest.json styles.css versions.json dist/paper-caption-preview.zip

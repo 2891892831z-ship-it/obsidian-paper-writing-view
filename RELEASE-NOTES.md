@@ -1,16 +1,15 @@
 ---
-date modified: 2026.10.16 15:03:35
+date modified: 2026.10.16 15:09:21
 ---
 
-# 0.9.0 · 论文写作视图
+# 0.10.0 · Paper Writing View
 
-- 将字体、行距、图片、表格、图表公式引用及空行辅助规整为一个独立插件。
-- 标准化源码、构建、测试和安装文件，新增 BRAT 安装与 GitHub 自动发布。
-- 保留插件 ID 与本机设置；不会打包个人文库、CSL 路径或外观配置。
-- 清理相互覆盖的行距、图注和英文缩进规则，图片边框仅在插件视图内生效。
-- 中文与英文外观分开保存，默认字体和字号可调；日常预览不改写 Markdown。
-- 修复引用插件重新加载后相对路径适配未恢复的问题。
+- 插件显示名统一为英文 Paper Writing View，保留插件 ID、命令 ID 与个人设置。
+- 设置顶部新增 Zotero 与引用配置入口：检查引用插件、Pandoc、文献库、CSL、YAML 字段类型和跨系统路径。
+- 支持打开引用设置、重新检查、重试引用及主动测试 Zotero Connector 连接；不后台反复弹窗。
+- 文库或样式文件不存在时提供路径提示，引用渲染失败可在诊断中查看；不自动修改用户引用配置。
+- 同一个 BRAT 插件包支持 Windows 与 macOS，增加三系统 CI；Mac 字体增加宋体回退。
 
-BRAT 仓库：`2891892831z-ship-it/obsidian-paper-writing-view`。
-基础排版不依赖导出插件；作者—年份引用可选接入 Pandoc Reference List。
-主要验证环境为 Windows Obsidian，未宣称精确模拟 Word 分页或完成移动端实机验收。
+BRAT：`2891892831z-ship-it/obsidian-paper-writing-view`。
+作者—年份引用可选接入 Pandoc Reference List；基础排版与 Word 导出插件独立。
+自动测试不代表完成 macOS Obsidian 图形界面实机验收。

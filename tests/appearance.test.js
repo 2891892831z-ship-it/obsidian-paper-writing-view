@@ -90,3 +90,15 @@ test('CSL conflict detection examines actual locale and citation punctuation, no
   assert.equal(c.issues('en','<style><citation><layout prefix="（" suffix="）"/></citation></style>').length,1);
   assert.equal(c.issues('zh','<style default-locale="en-US"/>').length,0);
 });
+
+test('citation setup diagnoses platform paths and rejects YAML lists while preserving note priority', () => {
+  const c={};
+  vm.runInNewContext(source.slice(source.indexOf('const DEFAULTS'),source.indexOf('// Use Obsidian'))+';this.config=citationConfiguration;',c);
+  const settings={pathToBibliography:'refs/library.bib',cslStylePath:'styles/default.csl',pathToPandoc:'/opt/homebrew/bin/pandoc'};
+  assert.equal(c.config({csl:'styles/note.csl'},settings,'mac').style,'styles/note.csl');
+  assert.equal(c.config({},settings,'mac').issues.length,0);
+  assert(c.config({csl:['a.csl']},settings,'mac').issues.some(s=>s.includes('单字符串')));
+  assert(c.config({csl:'C:/Users/test/style.csl'},settings,'mac').issues.some(s=>s.includes('Windows 路径')));
+  assert(c.config({},settings,'win').issues.some(s=>s.includes('macOS 路径')));
+  assert(c.config({}, {}, 'mac').issues.length>=3);
+});

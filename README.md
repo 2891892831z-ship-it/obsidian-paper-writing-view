@@ -1,21 +1,21 @@
 ---
 created: 2026-10-13 16:33
-date modified: 2026.10.16 15:03:35
+date modified: 2026.10.16 15:09:21
 tags: [Obsidian, 插件开发, 图注]
 ---
 
-# 论文写作视图 · Paper Writing View
+# Paper Writing View
 
 让 Obsidian 的论文写作界面接近 Word 的成稿排版：中文宋体、西文 Times New Roman、段落缩进与两端对齐、紧凑空行、图表公式预览及引用补全。字体、字号、颜色、行距、图片边框和表格外观都能在插件设置中调整。
 
-插件 ID 保持 `paper-caption-preview`，当前版本 **0.9.0**。已有本机版本可直接升级，保留设置。这是显示与写作辅助插件；Word 导出由独立项目 [MD Export Word](https://github.com/2891892831z-ship-it/obsidian-md-export-word) 负责，两者可分别安装。
+插件 ID 保持 `paper-caption-preview`，当前版本 **0.10.0**。已有本机版本可直接升级，保留设置。这是显示与写作辅助插件；Word 导出由独立项目 [MD Export Word](https://github.com/2891892831z-ship-it/obsidian-md-export-word) 负责，两者可分别安装。
 
 ## 通过 BRAT 安装
 
 1. 在 Obsidian 社区插件中安装并启用 **BRAT**。
 2. 打开 BRAT 设置，点击 **Add Beta plugin**。
 3. 输入 `2891892831z-ship-it/obsidian-paper-writing-view`。
-4. 安装后启用 **论文写作视图**。
+4. 安装后启用 **Paper Writing View**。
 5. 在插件设置中选择中文稿或英文稿外观，再调整字体、颜色和间距。
 
 不需要安装 Node.js、Python、Pandoc 或导出插件来使用基础排版、图注、图片、表格及图表公式补全。默认字体需要本机已安装；缺少时由系统回退，也可以在设置中选择其他字体。
@@ -77,3 +77,15 @@ Windows 本机已验证。代码未使用 Node 文件系统等桌面专用 API�
 ## 许可证
 
 [MIT](LICENSE)。Obsidian、CodeMirror 与可选引用插件由各自项目提供，本仓库不打包其实现。
+
+## Windows 与 macOS 配置提示
+
+两个系统使用同一份 BRAT 安装包，无需区分 Windows ZIP 与 Mac ZIP；自动测试覆盖 Windows、macOS 和 Linux 的解析、补全、排版及构建逻辑。CI 不等于 macOS Obsidian 窗口实机验收。
+
+设置顶部的“Zotero 与引用配置”可以检查依赖、文库、CSL 和 Pandoc，打开引用插件设置、重试引用或按需检查 Zotero 连接。不会后台反复弹窗，也不自动修改文库和 CSL。
+
+- Windows：选择本机 `pandoc.exe`，例如安装目录下的可执行文件。
+- macOS：选择本机 `pandoc`，Homebrew 常见路径为 `/opt/homebrew/bin/pandoc`（Apple Silicon）或 `/usr/local/bin/pandoc`（Intel），以实际安装为准。
+- 同步库建议将 `.bib` 和 `.csl` 放入库内并用相对路径；跨系统同步后需要重新配置本机 Pandoc 以及库外文件路径。
+- Mac 缺少宋体时，可选择 STSong 或 Songti SC；字体列表包含华文宋体选项，默认字体栈增加 Mac 宋体回退。
+- Zotero 连接检查只测试本机 Connector 响应，不证明 Better BibTeX 已安装或 citekey 完整；使用自动导出的本地 `.bib` 时，日常预览不要求 Zotero 始终运行。

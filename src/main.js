@@ -1,6 +1,6 @@
 'use strict';
 const {Plugin, PluginSettingTab, Setting, Notice, Modal, MarkdownView, EditorSuggest,
-  editorInfoField, editorLivePreviewField, sanitizeHTMLToDom, setIcon, renderMath, finishRenderMath} = require('obsidian');
+  editorInfoField, editorLivePreviewField, sanitizeHTMLToDom, setIcon, renderMath, finishRenderMath, Platform, requestUrl} = require('obsidian');
 const {StateField, StateEffect, EditorState} = require('@codemirror/state');
 const {Decoration, EditorView, WidgetType} = require('@codemirror/view');
 const {scanDocument, imageInventory, citationMap, maskExamples, blankLineViolations, referenceItems, documentIssues, blankLineEdits} = require('./core');
@@ -21,7 +21,7 @@ function appearanceVariables(settings) {
   const s = {...DEFAULTS, ...settings};
   const font = name => JSON.stringify(String(name).replace(/[\r\n]/g, '').trim());
   return {
-    '--pcp-font': (s.punctuationSong ? "'PCP Chinese Punctuation', " : '') + font(s.latinFont) + ', ' + font(s.chineseFont) + ', serif',
+    '--pcp-font': (s.punctuationSong ? "'PCP Chinese Punctuation', " : '') + font(s.latinFont) + ', ' + font(s.chineseFont) + ', STSong, \"Songti SC\", serif',
     '--pcp-body-size': s.bodySize ? s.bodySize + 'px' : 'var(--font-text-size)',
     '--pcp-body-line': String(s.bodyLineHeight), '--pcp-body-color': s.bodyThemeColor ? 'var(--text-normal)' : s.bodyColor,
     '--pcp-reference-color': s.referenceColor, '--pcp-caption-color': s.captionThemeColor ? 'var(--text-normal)' : s.captionColorCustom,
@@ -83,6 +83,27 @@ function citationStyleIssues(language,xml) {
   const citation=/<citation\b[\s\S]*?<\/citation>/i.exec(xml)?.[0] || '';
   if(language==='en' && (/^zh/i.test(locale)||/prefix=["']（|suffix=["']）|delimiter=["']；/.test(citation)))issues.push('当前 CSL 的默认语言或引用标点偏中文，请确认是否适用于英文稿。');
   return issues;
+}
+
+function citationConfiguration(frontmatter = {}, settings = {}, platform = '') {
+  const issues = [];
+  const resolve = (property, fallback) => {
+    const value = frontmatter[property] ?? fallback ?? '';
+    if (typeof value !== 'string') { issues.push(`${property} 必须是单字符串，不能是列表或对象。`); return ''; }
+    return value.trim();
+  };
+  const bibliography = resolve('bibliography', settings.pathToBibliography);
+  const style = resolve('csl', frontmatter['citation-style'] ?? (settings.cslStylePath || settings.cslStyleURL));
+  const pandoc = typeof settings.pathToPandoc === 'string' ? settings.pathToPandoc.trim() : '';
+  if (!bibliography && !settings.pullFromZotero) issues.push('未配置文献库：请在 Pandoc Reference List 中选择 .bib 文件，或启用其 Zotero 文库来源。');
+  if (!style) issues.push('未配置 CSL 引用样式：请在笔记 csl 或引用插件设置中选择样式。');
+  if (!pandoc) issues.push('未配置 Pandoc 路径：请打开 Pandoc Reference List 设置。');
+  for (const [label, value] of [['文献库',bibliography],['CSL',style],['Pandoc',pandoc]]) {
+    if (platform === 'mac' && /^(?:[a-z]:[\\/]|\\\\)/i.test(value)) issues.push(`${label} 仍是 Windows 路径，请在 Mac 上重新选择文件。`);
+    if (platform === 'win' && /^\/(?:Users|Applications|opt|usr|Volumes)\//.test(value)) issues.push(`${label} 仍是 macOS 路径，请在 Windows 上重新选择文件。`);
+    if (/^~[\\/]/.test(value)) issues.push(`${label} 的 ~ 路径可能无法展开，请选择完整路径或库内相对路径。`);
+  }
+  return {bibliography,style,pandoc,issues};
 }
 
 // Use Obsidian's native suggestion popup; do not replace other completions.
@@ -197,7 +218,7 @@ class CitationBridge {
       if (this.requests.get(file.path) === request) this.scopedMaps.set(file.path, map);
       request.ok = true;
       if (!this.plugin.disposed && this.requests.get(file.path) === request) this.notify(file.path);
-    }).catch(error => { console.warn('[Paper Caption Preview] CSL unavailable', error); })
+    }).catch(error => { request.error=String(error?.message || error); console.warn('[Paper Writing View] CSL unavailable', error); })
       .finally(() => { request.pending = false; });
   }
   notify(path) { for (const callback of [...this.listeners]) callback(path); }
@@ -474,9 +495,12 @@ class CaptionSettings extends PluginSettingTab {
     const el = this.containerEl; el.empty();
     this.editLanguage=this.editLanguage || this.plugin.languageFor(this.plugin.markdownView()?.file,this.plugin.markdownView()?.editor?.getValue()||'');
     this.editSettings=this.plugin.appearanceEditor(this.editLanguage);
-    el.createEl('h2', {text: '论文写作视图'});
+    el.createEl('h2', {text: 'Paper Writing View'});
     el.classList.add('pcp-settings');
     el.createEl('p', {text: '选择适合自己的论文阅读与写作外观，设置自动保存并应用到全库预览。'});
+    new Setting(el).setName('Zotero 与引用配置').setDesc('检查引用插件、Pandoc、文献库和 CSL；Windows 与 macOS 使用同一个插件包，各自配置本机路径。')
+      .addButton(b=>b.setButtonText('检查配置').onClick(()=>this.plugin.checkCitationSetup()))
+      .addButton(b=>b.setButtonText('打开引用设置').onClick(()=>this.plugin.openCitationSettings()));
     new Setting(el).setName('正在调整的外观').setDesc('中英文各自保存字号、行距、段间距、颜色、图注和表格外观。')
       .addDropdown(d=>d.addOptions({zh:'中文稿样式',en:'英文稿样式'}).setValue(this.editLanguage).onChange(v=>{this.editLanguage=v;this.display();}));
     const preview = el.createDiv({cls: 'pcp-appearance-preview'});
@@ -671,6 +695,7 @@ module.exports = class PaperCaptionPreview extends Plugin {
     this.addCommand({id: 'fix-current-blank', name: '补齐光标附近这一处空行', callback: () => this.fixBlankLines(undefined, true)});
     this.addCommand({id:'manuscript-language',name:'选择当前稿件语言',callback:()=>this.selectManuscriptLanguage()});
     this.addCommand({id:'citation-language-check',name:'检查稿件语言与引用样式',callback:()=>this.checkCitationLanguage()});
+    this.addCommand({id:'citation-setup',name:'检查 Zotero 与引用配置',callback:()=>this.checkCitationSetup()});
     this.frontmatterSignatures = new Map();
     this.registerEvent(this.app.metadataCache.on('changed', (file, _text, cache) => {
       if (!file) return;
@@ -695,13 +720,14 @@ module.exports = class PaperCaptionPreview extends Plugin {
     this.signatures = new Map();
     this.registerInterval(globalThis.setInterval(() => {
       const mode = String(!!this.legacy()) + ':' + String(this.conflict());
-      if (this.lastMode !== mode) { this.lastMode = mode; this.refresh(); }
+      const manager=this.citations.manager();
+      if (this.lastMode !== mode || this.scopedCitationManager !== (manager || null)) { this.lastMode = mode; this.refresh(); }
       for (const path of new Set([...this.citations.requests.keys()])) {
         const map = this.citations.map(path), signature = JSON.stringify([...map]);
         if (this.signatures.get(path) !== signature) { this.signatures.set(path, signature); this.citations.notify(path); }
       }
     }, 2000));
-    if (this.conflict()) new Notice('论文写作视图：旧 Pandoc Live Preview 尚未安装兼容补丁，已暂停重复渲染。');
+    if (this.conflict()) new Notice('Paper Writing View：旧 Pandoc Live Preview 尚未安装兼容补丁，已暂停重复渲染。');
   }
   updateBlankStatus(sourceView) {
     if (this.disposed || !this.blankStatus) return;
@@ -791,6 +817,55 @@ module.exports = class PaperCaptionPreview extends Plugin {
     for(const issue of report.issues.length?report.issues:['未发现明确的语言或括号冲突；这不代表已核验期刊全部引用要求。'])modal.contentEl.createEl('p',{text:issue});
     modal.contentEl.createEl('button',{text:'选择稿件语言'}).onclick=()=>{modal.close();this.selectManuscriptLanguage(view);};
     modal.contentEl.createEl('button',{text:'查看笔记属性与 CSL'}).onclick=()=>{modal.close();view.editor.setCursor({line:0,ch:0});view.editor.focus();};
+    modal.open();return modal;
+  }
+  openCitationSettings() {
+    const id='obsidian-pandoc-reference-list';
+    if(!this.app.plugins.plugins[id])return new Notice('请先在社区插件中安装并启用 Pandoc Reference List。基础排版仍可使用。');
+    this.app.setting.open();this.app.setting.openTabById(id);
+  }
+  async citationSetupReport(view=this.markdownView()) {
+    const dependency=this.app.plugins.plugins['obsidian-pandoc-reference-list'];
+    const manager=dependency?.bibManager;
+    const platform=Platform?.isMacOS?'mac':Platform?.isWin?'win':'';
+    const fm=view?.file?this.app.metadataCache.getFileCache(view.file)?.frontmatter || {}:{};
+    const config=citationConfiguration(fm,dependency?.settings || {},platform);
+    const issues=[];
+    if(!dependency)issues.push('未启用 Pandoc Reference List：安装并启用后才能显示作者—年份引用。字体、图片和表格功能不受影响。');
+    else {
+      issues.push(...config.issues);
+      if(!manager?.engine)issues.push('引用引擎尚未就绪，请检查引用插件设置并重新加载。');
+      const base=this.app.vault.adapter.getBasePath?.();
+      for(const [label,value] of [['文献库',config.bibliography],['CSL',config.style],['Pandoc',config.pandoc]]) {
+        if(!value || /^https?:\/\//i.test(value))continue;
+        const absolute=/^(?:[a-z]:[\\/]|\/|\\\\)/i.test(value);
+        if(!absolute && base && !await this.app.vault.adapter.exists(value.replace(/\\/g,'/')))issues.push(`${label} 在当前库中不存在：${value}`);
+        else if(absolute && this.app.vault.adapter.fs?.access) {
+          const exists=await new Promise(resolve=>this.app.vault.adapter.fs.access(value,error=>resolve(!error)));
+          if(!exists)issues.push(`${label} 文件不存在或无法访问：${value}`);
+        }
+      }
+    }
+    const request=view?.file?this.citations.requests.get(view.file.path):null;
+    if(request?.error)issues.push('当前笔记的引用渲染失败：'+request.error);
+    return {...config,platform,issues,dependency:!!dependency,ready:!!manager?.engine};
+  }
+  async checkCitationSetup() {
+    const view=this.markdownView(),report=await this.citationSetupReport(view);
+    const modal=new Modal(this.app);modal.contentEl.createEl('h2',{text:'Zotero 与引用配置'});
+    modal.contentEl.createEl('p',{text:'Paper Writing View 复用 Pandoc Reference List 的数据；不会修改 Zotero 全局设置，也不需要 Word 导出插件。'});
+    for(const [label,value] of [['当前笔记',view?.file?.path],['文献库',report.bibliography],['CSL',report.style],['Pandoc',report.pandoc]])modal.contentEl.createEl('p',{text:label+'：'+(value||'未指定')});
+    for(const issue of report.issues.length?report.issues:['基础配置已就绪。该检查不代表每条引用或所有期刊要求均已核验。'])modal.contentEl.createEl('p',{text:issue});
+    modal.contentEl.createEl('p',{text:'推荐使用 Better BibTeX 导出的 .bib，并开启自动导出。选择 .bib 文件时，预览不要求 Zotero 一直运行；更新文库仍需 Zotero。Windows 与 Mac 的绝对路径不可直接互用，库内相对路径更便于同步。'});
+    modal.contentEl.createEl('button',{text:'打开引用插件设置'}).onclick=()=>{modal.close();this.openCitationSettings();};
+    modal.contentEl.createEl('button',{text:'重新检查'}).onclick=()=>{modal.close();this.checkCitationSetup();};
+    modal.contentEl.createEl('button',{text:'刷新当前引用'}).onclick=()=>{this.citations.requests.clear();this.citations.scopedMaps.clear();this.refresh();new Notice('已重新请求引用；若仍显示 citekey，请检查文库中是否存在对应键。');};
+    modal.contentEl.createEl('button',{text:'检查 Zotero 连接（可选）'}).onclick=async event=>{
+      const button=event.currentTarget;button.disabled=true;
+      try {const response=await requestUrl({url:'http://127.0.0.1:23119/connector/ping',throw:false});new Notice(response.status===200?'Zotero 本机连接正常。此检查不验证 Better BibTeX 或文献完整性。':'Zotero 未返回正常响应；使用本地 .bib 时仍可预览引用。');}
+      catch {new Notice('未连接到 Zotero。请确认 Zotero 已启动；本地 .bib 预览不依赖此连接。');}
+      finally {button.disabled=false;}
+    };
     modal.open();return modal;
   }
   installScopedCitationPaths() {

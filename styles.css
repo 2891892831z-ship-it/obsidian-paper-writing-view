@@ -1,7 +1,7 @@
 /* Chinese quotation marks and em dash use SimSun; Latin/digits stay Times. */
 @font-face {
   font-family: 'PCP Chinese Punctuation';
-  src: local('SimSun'), local('宋体');
+  src: local('SimSun'), local('宋体'), local('STSong'), local('Songti SC');
   unicode-range: U+2014, U+2018-2019, U+201C-201D;
 }
 .pcp-figure { display: block; margin: 1em 0; width: 100%; cursor: text; }
