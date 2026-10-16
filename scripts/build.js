@@ -1,0 +1,12 @@
+'use strict';
+const fs = require('fs'), path = require('path');
+const root = path.resolve(__dirname, '..'), out = path.join(root, 'dist', 'paper-caption-preview');
+fs.mkdirSync(out, {recursive: true});
+const core = fs.readFileSync(path.join(root, 'src', 'core.js'), 'utf8');
+const source = fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8');
+if (source.split("require('./core')").length !== 2) throw new Error('Expected exactly one parser import.');
+const bundled = source.replace("require('./core')", () => '(()=>{const module={exports:{}};\n' + core + '\nreturn module.exports;})()');
+fs.writeFileSync(path.join(out, 'main.js'), bundled);
+fs.writeFileSync(path.join(root, 'main.js'), bundled);
+for (const file of ['styles.css', 'manifest.json']) fs.copyFileSync(path.join(root, file), path.join(out, file));
+console.log('Built ' + out);

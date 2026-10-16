@@ -1,0 +1,287 @@
+/* Chinese quotation marks and em dash use SimSun; Latin/digits stay Times. */
+@font-face {
+  font-family: 'PCP Chinese Punctuation';
+  src: local('SimSun'), local('宋体');
+  unicode-range: U+2014, U+2018-2019, U+201C-201D;
+}
+.pcp-figure { display: block; margin: 1em 0; width: 100%; cursor: text; }
+.pcp-figure-group { display: flex; gap: 12px; align-items: flex-start; width: 100%; }
+.pcp-figure-group > .pcp-figure { flex: 1 1 0; min-width: 0; }
+.pcp-figure img { height: auto; }
+.pcp-unified-native { position: relative; }
+.pcp-unified-native > .edit-block-button { display: none !important; }
+.pcp-unified-block > .edit-block-button { display: none !important; }
+.pcp-unified-native:hover > .pcp-native-toolbar,
+.pcp-unified-native:focus-within > .pcp-native-toolbar { opacity: 1; pointer-events: auto; }
+.pcp-native-toolbar { z-index: 5; }
+.pcp-appearance-preview { position: sticky; top: 0; z-index: 2; max-height: 42vh; overflow: auto; background: var(--background-primary); box-shadow: 0 3px 8px #0002; }
+.pcp-appearance-preview .pcp-sample-real-image { display: block; max-width: 100%; max-height: 100px; margin: auto; border: var(--pcp-image-border-width) var(--pcp-image-border-style) var(--pcp-image-border-color); }
+.pcp-sample-math { text-align: center; padding-block: 8px; }
+.pcp-navigation-modal { width: min(900px, 90vw); }
+.pcp-navigation-modal input[type=search] { width: 100%; margin-bottom: 12px; }
+.pcp-navigation-list { max-height: 60vh; overflow: auto; }
+.pcp-navigation-list .setting-item-name { overflow-wrap: anywhere; }
+.pcp-caption-only { margin: 0; }
+@media screen {
+  /* Word-like compact blank lines: prose separators collapse to a small gap.
+     Deliberately NOT !important so the older figure-adjacent 4px rules below
+     still win around figures. Code-block lines keep full height (blank lines
+     inside code are content); the active line keeps full height for editing. */
+  .pcp-preview-scope.pcp-compact-blanks .cm-content > .cm-line:has(> br:only-child):not(.cm-active):not(.HyperMD-codeblock) {
+    font-size: 0;
+    line-height: var(--pcp-blank-gap, 10px);
+    height: var(--pcp-blank-gap, 10px);
+    min-height: var(--pcp-blank-gap, 10px);
+    padding: 0;
+  }
+  /* Caption-only figures keep the native image widget; CodeMirror inserts
+     17px cm-widgetBuffer spacers around inline widgets, which opened a ~40px
+     gap between the image and our caption. Collapse the buffers on lines that
+     host a caption-only figure so the caption hugs the image like rescue
+     figures do (caption keeps its 0.65em top margin). The inline image widget
+     also needs baseline alignment removed: a 730px inline-block sitting on the
+     text baseline leaves a descender gap below it before the caption line. */
+  .pcp-preview-scope .cm-content > .cm-line:has(> .pcp-figure.pcp-caption-only) .cm-widgetBuffer {
+    height: 0 !important;
+    min-height: 0 !important;
+  }
+  .pcp-preview-scope .cm-content > .cm-line:has(> .pcp-figure.pcp-caption-only) .internal-embed,
+  .pcp-preview-scope .cm-content > .cm-line:has(> .pcp-figure.pcp-caption-only) .internal-embed img {
+    vertical-align: bottom !important;
+  }
+
+}
+.pcp-table-caption .pcp-caption { margin-top: 0; }
+/* Block replacements leave an empty boundary line as well as the source blank line.
+   Compact only empty lines next to our figures/captions; keep active editing lines full height. */
+.pcp-preview-scope .pcp-figure + .cm-line:has(> br:only-child):not(.cm-active),
+.pcp-preview-scope .pcp-figure + .cm-line:has(> br:only-child) + .cm-line:has(> br:only-child):not(.cm-active),
+.pcp-preview-scope .cm-line:has(> br:only-child):has(+ .pcp-figure):not(.cm-active),
+.pcp-preview-scope .cm-line:has(> br:only-child):has(+ .cm-line + .pcp-figure):not(.cm-active) { font-size: 0 !important; line-height: var(--pcp-image-gap, 4px) !important; height: var(--pcp-image-gap, 4px) !important; min-height: var(--pcp-image-gap, 4px) !important; padding: 0 !important; }
+.pcp-preview-scope .pcp-table-caption + .cm-table-widget,
+.pcp-preview-scope .pcp-table-caption + .cm-line:has(> br:only-child) + .cm-table-widget,
+.pcp-preview-scope .pcp-table-caption + .cm-line:has(> br:only-child) + .cm-line:has(> br:only-child) + .cm-table-widget { padding-top: 6px; }
+.pcp-caption mark { background-color: var(--text-highlight-bg, #ffe066); color: inherit; padding: 0; }
+.pcp-image-wrap { display: block; position: relative; width: fit-content; max-width: 100%; margin: 0 auto; }
+.pcp-center-images .cm-content .image-embed,
+.pcp-center-images .markdown-preview-view .image-embed { display: flex; justify-content: center; width: 100%; text-align: center; }
+.pcp-center-images .image-embed > .image-wrapper { margin-left: auto !important; margin-right: auto !important; max-width: 100%; }
+.pcp-center-images .cm-line > img,
+.pcp-center-images .markdown-preview-view p > img:only-child { display: block; margin-left: auto !important; margin-right: auto !important; }
+.pcp-center-images .pcp-image-wrap { margin-left: auto !important; margin-right: auto !important; }
+.pcp-preview-scope:not(.pcp-center-images) .pcp-image-wrap { margin-left: 0; }
+.pcp-optimize-tables .cm-content .table-wrapper,
+.pcp-optimize-tables .markdown-preview-view .table-wrapper { max-width: 100%; overflow-x: auto; }
+.pcp-optimize-tables .cm-content table,
+.pcp-optimize-tables .markdown-preview-view table { table-layout: auto; width: fit-content; max-width: 100%; margin-inline: auto; }
+.pcp-optimize-tables .cm-content :is(td, th),
+.pcp-optimize-tables .markdown-preview-view :is(td, th) { white-space: normal !important; overflow-wrap: anywhere; word-break: normal; vertical-align: middle !important; text-align: center !important; min-width: 4em; max-width: 28em; }
+.pcp-optimize-tables .table-cell-wrapper { white-space: normal !important; overflow-wrap: anywhere; text-align: center !important; }
+.pcp-preview-scope .pandoc-def,
+.pcp-preview-scope .pandoc-def *,
+.pcp-preview-scope .pcp-caption,
+.pcp-preview-scope .pcp-caption * { user-select: text !important; -webkit-user-select: text !important; cursor: text; }
+.pcp-optimize-tables .pcp-table-citation { white-space: normal; overflow-wrap: anywhere; }
+.pcp-image-wrap > img { display: block; max-width: 100%; height: auto; }
+.pcp-image-toolbar { position: absolute; top: 10px; right: 10px; display: flex; gap: 4px; padding: 5px; border-radius: 10px; background: var(--background-primary); box-shadow: 0 2px 8px rgba(0,0,0,0.12); opacity: 0; transition: opacity 0.15s; }
+.pcp-image-wrap:hover .pcp-image-toolbar, .pcp-image-toolbar:focus-within { opacity: 1; }
+.pcp-image-toolbar button { display: flex; align-items: center; justify-content: center; width: 36px; height: 32px; padding: 5px; border: 0; box-shadow: none; background: transparent; cursor: pointer; }
+.pcp-image-toolbar button:hover { background: var(--background-modifier-hover); }
+.pcp-caption { display: block; margin-top: var(--pcp-caption-gap, 0.65em); line-height: 1.65; color: var(--text-normal); white-space: pre-wrap; overflow-wrap: anywhere; }
+.pcp-caption sub, .pcp-caption sup { font-size: 0.75em; line-height: 0; position: relative; vertical-align: baseline; }
+.pcp-caption sub { bottom: -0.25em; }
+.pcp-caption sup { top: -0.5em; }
+.pcp-citation, .pcp-reference { color: var(--text-accent); }
+.pcp-preview-scope .pcp-reference { display: inline-block; white-space: pre; text-indent: 0; }
+/* Figure/table/equation cross references share the citation blue. */
+.pcp-preview-scope .pcp-reference { color: #3498db !important; text-decoration: underline dotted; text-decoration-color: var(--pwc-citation-underline-color, var(--text-accent)); }
+/* Missing-blank-line warning: a red bar marks lines pandoc would mis-parse. */
+@media screen {
+  .pcp-preview-scope.pcp-blank-warn-on .cm-content > .cm-line.pcp-blank-warn {
+    box-shadow: inset 3px 0 0 #e74c3c;
+    background: rgba(231, 76, 60, 0.05);
+  }
+}
+/* Captions: black, SimSun for CJK + Times New Roman for Latin, Word 五号
+   (10.5pt ≈ 0.875em against the 12pt body text the editor renders at 1em). */
+.pcp-preview-scope .pcp-caption,
+.pcp-preview-scope .pandoc-def {
+  color: var(--text-normal) !important;
+  font-family: 'PCP Chinese Punctuation', 'Times New Roman', 'SimSun', '宋体', serif !important;
+  font-size: 0.875em !important;
+}
+/* Equation label: right-aligned "（式 N）" like Word's numbered equations. */
+.pcp-preview-scope .pcp-eq-label { display: block; width: 100%; text-align: right; color: var(--text-normal); font-family: 'PCP Chinese Punctuation', 'Times New Roman', 'SimSun', '宋体', serif; font-size: 0.875em; }
+/* Reading mode renders captions via the image-captions plugin's native
+   <figcaption>; give them the same black SimSun/Times 五号 treatment. */
+.pcp-preview-scope .markdown-preview-view figcaption {
+  color: var(--text-normal);
+  font-family: 'PCP Chinese Punctuation', 'Times New Roman', 'SimSun', '宋体', serif !important;
+  font-size: 0.875em !important;
+  text-align: center;
+}
+.pcp-preview-scope :is(.pcp-caption, .pandoc-def) :is(.pcp-citation, .pandoc-citation, a),
+.pcp-preview-scope .pcp-table-citation { color: #3498db !important; text-decoration: underline dotted; text-decoration-color: var(--pwc-citation-underline-color, var(--text-accent)); }
+.pcp-unresolved-citation { text-decoration: underline dotted var(--text-warning); }
+.pcp-missing .pcp-image-wrap > img { min-height: 50px; border: 1px dashed var(--text-warning); padding: 12px; }
+.pcp-image-wrap > img { cursor: zoom-in; }
+.pcp-image-modal { width: min(95vw, 1500px); }
+.pcp-zoom-controls { display: flex; gap: 8px; margin-bottom: 12px; }
+.pcp-image-viewport { overflow: auto; max-height: 80vh; text-align: center; }
+.pcp-image-viewport img { max-width: 100%; max-height: 75vh; object-fit: contain; }
+
+/* Native images and caption widgets must not reserve anonymous text lines. */
+@media screen {
+  .pcp-preview-scope .cm-content > .cm-line:has(> .pcp-caption-only) {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .pcp-preview-scope .cm-content > .cm-line:has(> .pcp-caption-only) > .cm-widgetBuffer {
+    display: none !important;
+  }
+  .pcp-preview-scope.pcp-word-spacing .cm-content > .cm-line:has(> .pcp-figure.pcp-caption-only) > .pcp-figure.pcp-caption-only,
+  .pcp-preview-scope .cm-content > .cm-line:has(> .pcp-figure.pcp-caption-only) > .pcp-figure.pcp-caption-only {
+    margin-top: 0 !important;
+  }
+}
+/* Vault-wide screen-only image boundaries, including native/wiki embeds. */
+@media screen {
+  .pcp-preview-scope :is(.image-embed img, .pcp-image-wrap > img),
+  .pcp-preview-scope .markdown-preview-view :is(p, figure) > img {
+    outline: var(--pcp-image-border-width, 1.5px) var(--pcp-image-border-style, dashed) var(--pcp-image-border-color, #e53935);
+    outline-offset: 0;
+    border-radius: 0;
+  }
+  /* Also compact separators beside native image lines, not just rescue widgets. */
+  .pcp-preview-scope .cm-content > .cm-line:has(> br:only-child):not(.cm-active):not(.HyperMD-codeblock):is(
+    :has(+ .cm-line .image-embed),
+    :has(+ .cm-line:has(> br:only-child) + .cm-line .image-embed),
+    .cm-line:has(.image-embed) + .cm-line,
+    .cm-line:has(.image-embed) + .cm-line:has(> br:only-child) + .cm-line
+  ) {
+    font-size: 0 !important;
+    line-height: var(--pcp-image-gap, 4px) !important;
+    height: var(--pcp-image-gap, 4px) !important;
+    min-height: var(--pcp-image-gap, 4px) !important;
+    padding: 0 !important;
+  }
+  .pcp-preview-scope .markdown-preview-view :is(figure, p:has(> .image-embed), p:has(> img:only-child)) {
+    margin-block: var(--pcp-image-gap, 4px);
+  }
+}
+.pcp-review-modal { width: min(900px, 90vw); }
+.pcp-review-list { max-height: 55vh; overflow-y: auto; }
+.pcp-review-row { border-bottom: 1px solid var(--background-modifier-border); padding: 12px 0; }
+.pcp-review-row pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 120px; overflow-y: auto; font-size: var(--font-ui-small); }
+.pcp-review-row button { margin-right: 8px; }
+@media screen {
+  .pcp-preview-scope figure.pcp-figure { margin-block: var(--pcp-image-gap, 4px); }
+}
+/* Center all table cells; native wrappers must not fill the row height. */
+.pcp-optimize-tables :is(.cm-content, .markdown-preview-view) table :is(th, td) {
+  text-align: center !important;
+  vertical-align: middle !important;
+}
+.pcp-optimize-tables :is(.cm-content, .markdown-preview-view) table .table-cell-wrapper {
+  height: auto !important;
+  text-align: center !important;
+}
+.pcp-optimize-tables :is(.cm-content, .markdown-preview-view) table :is(th, td) p {
+  text-align: center !important;
+  margin-block: 0 !important;
+}
+.pcp-blank-status { cursor: pointer; }
+.pcp-language-status { cursor: pointer; }
+.pcp-language-status:hover { color: var(--text-accent); }
+.pcp-blank-status.pcp-has-blank-issues { color: var(--text-warning); }
+
+.pcp-preview-scope .pcp-blank-notice {
+  display: block;
+  margin: 4px 0;
+  padding: 4px 10px;
+  color: var(--text-error);
+  background: var(--background-primary);
+  border: 1px dashed var(--text-error);
+  font-family: var(--font-interface);
+  font-size: var(--font-ui-small);
+  cursor: pointer;
+}
+/* Appearance controls own typography inside paper views, above legacy snippets. */
+.pcp-preview-scope.pcp-word-spacing :is(.cm-scroller, .cm-content, .markdown-preview-view) {
+  font-family: var(--pcp-font) !important;
+  font-size: var(--pcp-body-size) !important;
+  line-height: var(--pcp-body-line) !important;
+  color: var(--pcp-body-color) !important;
+}
+.pcp-preview-scope.pcp-word-spacing .cm-content > .cm-line:not(.HyperMD-header):not(.HyperMD-codeblock):not(:has(> br:only-child)) {
+  line-height: var(--pcp-body-line) !important;
+}
+.pcp-preview-scope.pcp-word-spacing :is(.cm-content .cm-header, .markdown-preview-view h1, .markdown-preview-view h2, .markdown-preview-view h3, .markdown-preview-view h4, .markdown-preview-view h5, .markdown-preview-view h6) { font-family: var(--pcp-font) !important; }
+.pcp-preview-scope .cm-content > .cm-line.pcp-paragraph-start { text-indent: var(--pcp-indent, 2em) !important; }
+.pcp-preview-scope.pcp-word-spacing :is(.pcp-caption, .pandoc-def, .pcp-eq-label, .markdown-preview-view figcaption) {
+  font-family: var(--pcp-font) !important;
+  color: var(--pcp-caption-color) !important;
+  font-size: var(--pcp-caption-size) !important;
+  line-height: var(--pcp-caption-line) !important;
+}
+.pcp-preview-scope :is(.cm-content, .markdown-preview-view) :is(.pandoc-citation, .pcp-citation, .pcp-table-citation, .citation, .pcp-reference),
+.pcp-preview-scope :is(.cm-content, .markdown-preview-view) :is(.pandoc-citation, .pcp-citation, .pcp-table-citation, .citation) * {
+  font-family: var(--pcp-font) !important;
+  color: var(--pcp-reference-color) !important;
+  text-decoration-color: var(--pcp-reference-color) !important;
+}
+.pcp-preview-scope.pcp-optimize-tables.pcp-word-spacing :is(.cm-scroller, .markdown-preview-view) table,
+.pcp-preview-scope.pcp-optimize-tables.pcp-word-spacing :is(.cm-scroller, .markdown-preview-view) table :is(th, td) {
+  font-family: var(--pcp-font) !important;
+  font-size: var(--pcp-table-size) !important;
+  line-height: var(--pcp-table-line) !important;
+}
+.pcp-settings-section { margin-block: 14px; padding: 12px; border: 1px solid var(--background-modifier-border); border-radius: 8px; }
+.pcp-settings-section summary { font-weight: 600; cursor: pointer; }
+.pcp-appearance-preview { padding: 18px; border: 1px solid var(--background-modifier-border); border-radius: 10px; background: var(--background-primary); color: var(--pcp-body-color); font-family: var(--pcp-font); font-size: var(--pcp-body-size); line-height: var(--pcp-body-line); }
+.pcp-appearance-preview .pcp-preview-label { font: 12px var(--font-interface); color: var(--text-muted); }
+.pcp-appearance-preview p { text-indent: var(--pcp-indent); margin-block: var(--pcp-blank-gap); }
+.pcp-appearance-preview .pcp-sample-reference { color: var(--pcp-reference-color); text-decoration: underline dotted; }
+.pcp-appearance-preview .pcp-sample-image { outline: var(--pcp-image-border-width) var(--pcp-image-border-style) var(--pcp-image-border-color); margin: 12px auto; max-width: 220px; padding: 12px; text-align: center; color: var(--text-muted); }
+.pcp-appearance-preview .pcp-sample-caption { margin-top: var(--pcp-caption-gap); font-size: var(--pcp-caption-size); line-height: var(--pcp-caption-line); color: var(--pcp-caption-color); text-align: center; }
+.pcp-appearance-preview table { margin: 12px auto 0; font-size: var(--pcp-table-size); line-height: var(--pcp-table-line); }
+.pcp-appearance-preview td { padding: 5px 16px; border: 1px solid var(--background-modifier-border); text-align: center; }
+
+/* Both manuscript languages justify prose; first-line indentation stays separate. */
+.pcp-preview-scope .cm-content > .cm-line.pcp-prose-line,
+.pcp-preview-scope .markdown-preview-view p,
+.pcp-appearance-preview p {
+  text-align: justify !important;
+  text-align-last: start !important;
+}
+.pcp-preview-scope .markdown-preview-view :is(th, td) p { text-align: center !important; }
+.pcp-preview-scope.pcp-english :is(.cm-scroller, .markdown-preview-view) :is(.cm-line, .cm-line span, p, h1, h2, h3, h4, h5, h6, th, td, figcaption, .pandoc-citation, .pandoc-citation *, .pcp-citation, .pcp-citation *, .pcp-reference, .pcp-caption) {
+  font-family: var(--pcp-font) !important;
+}
+.pcp-preview-scope.pcp-english .markdown-preview-view :is(th, td) p { text-align: center !important; }
+.pcp-preview-scope.pcp-english .cm-content > .cm-line.pcp-paragraph-start,
+.pcp-preview-scope.pcp-english .markdown-preview-view p,
+.pcp-appearance-preview.pcp-english p { text-indent: var(--pcp-indent, 1em) !important; }
+.pcp-preview-scope.pcp-english .markdown-preview-view :is(th, td, li, blockquote) p { text-indent: 0 !important; }
+
+/* Reading paragraphs use the same spacing controls as Live Preview. */
+.pcp-preview-scope.pcp-word-spacing .markdown-preview-view p {
+  line-height: var(--pcp-body-line) !important;
+  margin-block: var(--pcp-blank-gap) !important;
+}
+.pcp-preview-scope.pcp-indent-paragraphs .markdown-preview-view p {
+  text-indent: var(--pcp-indent, 2em);
+}
+.pcp-preview-scope .markdown-preview-view :is(th, td, li, blockquote, figcaption, .pcp-caption) p {
+  text-indent: 0 !important;
+}
+/* Table, caption and code sizes stay independent of body paragraphs. */
+.pcp-preview-scope.pcp-word-spacing .markdown-preview-view :is(th, td) p {
+  line-height: var(--pcp-table-line) !important;
+  margin-block: 0 !important;
+}
+.pcp-preview-scope.pcp-word-spacing :is(.cm-strong, .markdown-preview-view strong) {
+  color: var(--pcp-reference-color);
+  font-family: inherit;
+}

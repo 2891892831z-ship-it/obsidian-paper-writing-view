@@ -1,0 +1,10 @@
+node_modules/
+dist/
+qa-*.py
+qa-local/
+*.log
+*.bak
+*.zip
+data.json
+.DS_Store
+Thumbs.db

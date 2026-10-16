@@ -1,0 +1,25 @@
+name: Publish BRAT release
+on:
+  push:
+    tags: ['*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      - run: node scripts/validate-release.js "$GITHUB_REF_NAME"
+      - name: Package install folder
+        run: cd dist && zip -r paper-caption-preview.zip paper-caption-preview
+      - name: Publish plugin assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "论文写作视图 $GITHUB_REF_NAME" --notes-file RELEASE-NOTES.md main.js manifest.json styles.css versions.json dist/paper-caption-preview.zip
