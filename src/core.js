@@ -328,8 +328,15 @@ function fakeScriptViolations(text) {
   return issues;
 }
 
+function performanceDecision(mode, length, imageCount = 0) {
+  const large = mode === 'large' || (mode !== 'normal' && (length >= 80000 || imageCount >= 60));
+  return {large, mode:['normal','large'].includes(mode)?mode:'auto', length, imageCount,
+    reason:mode === 'large' ? '手动选择' : mode === 'normal' ? '手动选择' :
+      length >= 80000 ? '正文达到 8 万字符' : imageCount >= 60 ? '图片标记达到 60 处' : '未达到大稿件阈值'};
+}
+
 function fakeScriptEdits(text, issues, timestamp) {
   return timestampedEdits(text, issues.map(v => ({from:v.from,to:v.to,insert:v.replacement})), timestamp);
 }
 
-module.exports = {scanDocument, imageAt, imageInventory, maskExamples, citationMap, blankLineViolations, referenceItems, documentIssues, blankLineEdits, fakeScriptViolations, fakeScriptEdits};
+module.exports = {scanDocument, imageAt, imageInventory, maskExamples, citationMap, blankLineViolations, referenceItems, documentIssues, blankLineEdits, fakeScriptViolations, fakeScriptEdits, performanceDecision};

@@ -5,7 +5,7 @@ const fs = require('fs'), path = require('path'), vm = require('vm');
 async function fixture(text, options = {}) {
   const info = Symbol('editorInfo'), live = Symbol('livePreview');
   const modals = [], notices = [];
-  function ui() {return {children:[],style:{},classList:{add(){},toggle(){}},setAttribute(){},setText(t){this.text=t;},
+  function ui() {return {children:[],style:{},classList:{add(){},toggle(){}},setAttribute(){},setText(t){this.text=t;},empty(){this.children=[];},
     createEl(tag,spec={}){const child=ui();child.tag=tag;child.text=spec.text;this.children.push(child);return child;},
     createDiv(spec){return this.createEl('div',spec);},appendText(t){this.text=t;}};}
   class Modal {constructor(){this.modalEl=ui();this.contentEl=ui();modals.push(this);}open(){}close(){this.closed=true;}}
@@ -81,6 +81,27 @@ test('fake script repair refuses a stale preview after text changes or file swit
   text='changed CO₂';button.onclick();assert.equal(calls,0);
   text='CO₂';source.file={path:'other.md'};button.onclick();assert.equal(calls,0);
   assert.equal(notices.filter(n=>n.includes('笔记已变化')).length,2);
+});
+
+test('large repair previews render 100 rows per page and retain explicit selections across pages',async()=>{
+  const {plugin}=await fixture('CO₂ '.repeat(250));
+  let text='CO₂ '.repeat(250),calls=0;
+  const source={file:{path:'note.md'},editor:{getValue:()=>text,cm:{dispatch({changes}){
+    calls++;for(const c of Array.from(changes).reverse())text=text.slice(0,c.from)+c.insert+text.slice(c.to??c.from);
+  }}}};
+  const modal=plugin.fixFakeScripts(source),pager=modal.contentEl.children[2],list=modal.contentEl.children[3];
+  const button=(root,label)=>root.children.find(c=>c.tag==='button'&&c.text===label);
+  assert.equal(list.children.length,100);
+  button(pager,'清空选择').onclick();
+  let check=list.children[0].children[0].children[0];check.checked=true;check.onchange();
+  button(pager,'下一页').onclick();
+  check=list.children[0].children[0].children[0];assert.equal(check.checked,false);check.checked=true;check.onchange();
+  button(pager,'下一页').onclick();assert.equal(list.children.length,50);
+  button(pager,'上一页').onclick();button(pager,'上一页').onclick();
+  assert.equal(list.children[0].children[0].children[0].checked,true);
+  button(modal.contentEl.children.at(-1),'修复所选').onclick();
+  assert.equal(calls,1);assert.equal((text.match(/<sub>2<\/sub>/g)||[]).length,2);
+  assert.equal((text.match(/₂/g)||[]).length,248);
 });
 
 test('citation path bridge survives reference plugin reload and restores previous managers', async()=>{

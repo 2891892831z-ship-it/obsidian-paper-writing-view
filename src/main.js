@@ -3,7 +3,7 @@ const {Plugin, PluginSettingTab, Setting, Notice, Modal, MarkdownView, EditorSug
   editorInfoField, editorLivePreviewField, sanitizeHTMLToDom, setIcon, renderMath, finishRenderMath, Platform, requestUrl} = require('obsidian');
 const {StateField, StateEffect, EditorState} = require('@codemirror/state');
 const {Decoration, EditorView, WidgetType} = require('@codemirror/view');
-const {scanDocument, imageInventory, citationMap, maskExamples, blankLineViolations, referenceItems, documentIssues, blankLineEdits, fakeScriptViolations, fakeScriptEdits} = require('./core');
+const {scanDocument, imageInventory, citationMap, maskExamples, blankLineViolations, referenceItems, documentIssues, blankLineEdits, fakeScriptViolations, fakeScriptEdits, performanceDecision} = require('./core');
 
 const refreshEffect = StateEffect.define();
 const DEFAULTS = {prefix: '图', align: 'center', bold: false, showUnlabelled: true, citations: true, centerImages: true, optimizeTables: true, indentParagraphs: true, compactBlankLines: true, blankLineWarnings: true, wordSpacing: true,
@@ -11,7 +11,7 @@ const DEFAULTS = {prefix: '图', align: 'center', bold: false, showUnlabelled: t
   chineseFont: 'SimSun', latinFont: 'Times New Roman', punctuationSong: true, bodySize: 0, bodyLineHeight: 1.5,
   bodyThemeColor: true, bodyColor: '#222222', referenceColor: '#3498db', captionThemeColor: true, captionColorCustom: '#222222',
   paragraphGap: 10, indentSize: 2, captionScale: 0.875, captionLineHeight: 1.65, tableSize: 12, tableLineHeight: 1,
-  quietBlankWarnings: true, fakeScriptWarnings: true, appearanceProfiles: {}, manuscriptLanguages: {}, languageAppearance: {}};
+  quietBlankWarnings: true, fakeScriptWarnings: true, performanceMode: 'auto', appearanceProfiles: {}, manuscriptLanguages: {}, languageAppearance: {}};
 
 const APPEARANCE_KEYS = ['chineseFont','latinFont','punctuationSong','bodySize','bodyLineHeight','bodyThemeColor','bodyColor',
   'referenceColor','captionThemeColor','captionColorCustom','paragraphGap','indentSize','captionScale','captionLineHeight','tableSize','tableLineHeight',
@@ -50,7 +50,7 @@ function languageDecision(frontmatter = {}, text = '', manual) {
   const classes=Array.isArray(frontmatter.cssclasses)?frontmatter.cssclasses:String(frontmatter.cssclasses||'').split(/\s+/);
   if(classes.includes('en-doc'))return {language:'en',source:'cssclasses: en-doc',uncertain:false};
   if(!text)return {language:'zh',source:'默认中文（正文不足）',uncertain:true};
-  const body=maskExamples(text).replace(/!\[[\s\S]*?\]\([^\r\n]*?\)(?:\{[^}]*\})?/g,'').replace(/!\[\[[^\]]*\]\]/g,'')
+  const body=maskExamples(text.slice(0,30000)).replace(/!\[[\s\S]*?\]\([^\r\n]*?\)(?:\{[^}]*\})?/g,'').replace(/!\[\[[^\]]*\]\]/g,'')
     .replace(/\[@[^\]]*\]|@(?:fig|tbl|eq):[\w:-]+|https?:\/\/\S+|<[^>]*>|\$[\s\S]*?\$/g,'').slice(0,30000);
   const han=(body.match(/[\p{Script=Han}]/gu)||[]).length,latin=(body.match(/[A-Za-z]/g)||[]).length;
   const total=han+latin,ratio=total?han/total:0;
@@ -177,6 +177,7 @@ class CitationBridge {
     return result;
   }
   ensure(file, text) {
+    if (this.plugin.largePending?.has(file?.path)) return;
     const manager = this.manager();
     if (!manager?.getReferenceList || !file || !text.includes('[@')) return;
     const last = this.requests.get(file.path);
@@ -243,12 +244,14 @@ class FigureWidget extends WidgetType {
     // Event handlers retain this original instance: update its source positions
     // instead of replacing loaded images when preceding prose changes length.
     Object.assign(previous, {figure: this.figure, file: this.file, text: this.text, numbers: this.numbers});
+    this.domPeer = previous;
     return true;
   }
   toDOM(view) {
     const doc = view.dom.ownerDocument, wrap = doc.createElement(this.figure.rescue ? 'figure' : 'span');
     wrap.className = this.figure.rescue ? 'pcp-figure' : 'pcp-figure pcp-caption-only'; wrap.dataset.figureId = this.figure.id || '';
     wrap._pcpWidget = this;
+    this.domPeer = this;
     if (this.figure.type === 'tbl') wrap.classList.add('pcp-table-caption');
     if (this.figure.blankWarning) {
       wrap.classList.add('pcp-image-blank-warn');
@@ -260,6 +263,7 @@ class FigureWidget extends WidgetType {
     }
     if (this.figure.rescue) {
     const image = doc.createElement('img'); image.alt = this.figure.caption.replace(/<[^>]*>/g, '');
+    image.loading = 'lazy'; image.decoding = 'async';
     image.draggable = false;
     image.title = '双击放大预览';
     image.addEventListener('dblclick', event => {
@@ -382,7 +386,8 @@ function buildDecorations(plugin, state) {
   if (!state.field(editorLivePreviewField, false) || plugin.disposed || plugin.conflict()) return Decoration.none;
   const info = state.field(editorInfoField, false), file = info?.file;
   if (!file) return Decoration.none;
-  const text = state.doc.toString(), parsed = scanDocument(text), widgets = [];
+  const analysis = plugin.documentAnalysis(state.doc), {text, parsed} = analysis, widgets = [];
+  plugin.rememberSize(file, state.doc, analysis.imageCount);
   if (plugin.settings.citations) plugin.citations.ensure(file, text);
   const rawFrontmatter = plugin.app.metadataCache.getFileCache(file)?.frontmatter;
   const frontmatter = {...rawFrontmatter, lang:plugin.languageFor(file,text)==='en'?'en-US':'zh-CN'};
@@ -393,7 +398,7 @@ function buildDecorations(plugin, state) {
   {
     // Raw lines identify real blank lines: maskExamples blanks fenced and indented
     // code, so masked-whitespace lines inside code must never become indent hosts.
-    const lines = maskExamples(text).split('\n'), rawLines = text.split('\n');
+    const {lines, rawLines} = analysis;
     const frontmatterBlock = /^---\r?\n[\s\S]*?\r?\n---(?=\r?\n|$)/.exec(text);
     const frontmatterEnd = frontmatterBlock ? frontmatterBlock[0].length : -1;
     // The caret line gets the visual indent while still blank, so pressing Enter
@@ -407,8 +412,12 @@ function buildDecorations(plugin, state) {
     // Count $$ marks instead of toggling: an inline $$x$$ line must not flip the state.
     // Track fenced code with the same rules as maskExamples so blank lines inside
     // fences are never mistaken for caret paragraph starts.
-    let offset = 0, mathMarks = 0, fence = null;
+    let offset = 0, mathMarks = 0, fence = null, figureIndex = 0, tableIndex = 0;
     for (let i = 0; i < lines.length; i++) {
+      while (figureIndex < parsed.figures.length && parsed.figures[figureIndex].to <= offset) figureIndex++;
+      while (tableIndex < parsed.tables.length && parsed.tables[tableIndex].to <= offset) tableIndex++;
+      const inFigure = parsed.figures[figureIndex]?.from <= offset && offset < parsed.figures[figureIndex].to;
+      const inTable = parsed.tables[tableIndex]?.from <= offset && offset < parsed.tables[tableIndex].to;
       const line = lines[i].trim(), hasText = !!rawLines[i].trim();
       // content = a real prose line; code lines masked to whitespace have raw text
       // but no masked text and must be skipped entirely.
@@ -421,7 +430,7 @@ function buildDecorations(plugin, state) {
       } else if (fenceMark) fence = fenceMark[1];
       const structural = /^(?:#{1,6}\s|>|[-+*]\s|\d+[.)]\s|\||!\[|!\[\[|\{#|:{1,3}(?:\s|$)|<|\$\$|[-*_]{3,}\s*$)/.test(line);
       if (offset>frontmatterEnd && content && !structural && !inMath && !inFence &&
-        !parsed.figures.some(f=>offset>=f.from && offset<f.to) && !parsed.tables.some(t=>offset>=t.from && offset<t.to))
+        !inFigure && !inTable)
         widgets.push(Decoration.line({class:'pcp-prose-line'}).range(offset));
       // A line starts a paragraph when the previous line is blank (or it is the
       // first line). Blank caret lines only indent when typing there would form
@@ -429,8 +438,7 @@ function buildDecorations(plugin, state) {
       const startsParagraph = i === 0 || !lines[i - 1].trim();
       if (plugin.settings.indentParagraphs && offset > frontmatterEnd && !inMath && !inFence && !structural &&
         (content ? startsParagraph : (startsParagraph && !hasText && i === caretIndex)) &&
-        !parsed.figures.some(f => offset >= f.from && offset < f.to) &&
-        !parsed.tables.some(t => offset >= t.from && offset < t.to)) {
+        !inFigure && !inTable) {
         widgets.push(Decoration.line({class: 'pcp-paragraph-start'}).range(offset));
       }
       offset += lines[i].length + 1;
@@ -438,7 +446,7 @@ function buildDecorations(plugin, state) {
   }
   // Warn about blank lines pandoc needs: a missing one turns images inline,
   // kills headings, and turns table captions into definition lists.
-  const blankViolations = plugin.settings.blankLineWarnings ? blankLineViolations(text).violations : [];
+  const blankViolations = plugin.settings.blankLineWarnings ? (analysis.blanks ??= blankLineViolations(text).violations) : [];
   if (plugin.settings.blankLineWarnings) {
     for (const violation of blankViolations) {
       if (plugin.settings.quietBlankWarnings && !touches(state.doc.lineAt(violation.from).from, state.doc.lineAt(violation.from).to)) continue;
@@ -489,6 +497,51 @@ function buildDecorations(plugin, state) {
   return Decoration.set(widgets, true);
 }
 
+function mapLargeDecorations(previous, transaction) {
+  const changed = [];
+  if (transaction.docChanged) transaction.changes.iterChangedRanges((from, to) => {
+    changed.push({from:transaction.startState.doc.lineAt(from).from, to:transaction.startState.doc.lineAt(to).to});
+  });
+  let mapped = previous.update({filter:(from,to) => !changed.some(r => from <= r.to && to >= r.from)}).map(transaction.changes);
+  const mapWidget = widget => {
+    if (widget?.items) {widget.items.forEach(mapWidget); return;}
+    if (!widget?.figure) return;
+    const figure = {...widget.figure};
+    for (const key of ['from','to','groupFrom','groupTo','imageTo']) if (Number.isInteger(figure[key]))
+      figure[key] = transaction.changes.mapPos(figure[key], key === 'to' || key === 'groupTo' || key === 'imageTo' ? -1 : 1);
+    widget.figure = figure;
+    if (widget.domPeer) widget.domPeer.figure = figure;
+  };
+  mapped.between(0,transaction.state.doc.length,(_from,_to,value) => mapWidget(value.spec.widget));
+  // Reveal source immediately at the caret; restore hidden widgets after the idle refresh.
+  return mapped.update({filter:(from,to,value) => !value.spec.widget ||
+    !transaction.state.selection.ranges.some(r => {
+      const start = value.spec.block ? transaction.state.doc.lineAt(from).from : from;
+      const end = value.spec.block ? transaction.state.doc.lineAt(to).to : to;
+      return r.from <= end && r.to >= start;
+    })});
+}
+
+function reviewList(content, items, selected, renderRow) {
+  const paged=items.length>100, pager=paged?content.createDiv({cls:'pcp-zoom-controls'}):null;
+  const list=content.createDiv({cls:'pcp-review-list'});
+  let page=0, previous, next, label;
+  const describe=()=>{if(label)label.setText(`第 ${page+1} / ${Math.ceil(items.length/100)} 页 · 已选 ${selected.size} / ${items.length} 处（跨页保留）`);};
+  const draw=()=>{
+    list.empty();
+    for(const item of items.slice(page*100,page*100+100))renderRow(list.createDiv({cls:'pcp-review-row'}),item,describe);
+    if(paged){previous.disabled=page===0;next.disabled=(page+1)*100>=items.length;describe();}
+  };
+  if(paged){
+    previous=pager.createEl('button',{text:'上一页'});previous.onclick=()=>{page--;draw();};
+    label=pager.createEl('span');
+    next=pager.createEl('button',{text:'下一页'});next.onclick=()=>{page++;draw();};
+    pager.createEl('button',{text:'全选'}).onclick=()=>{items.forEach(i=>selected.add(i));draw();};
+    pager.createEl('button',{text:'清空选择'}).onclick=()=>{selected.clear();draw();};
+  }
+  draw();
+}
+
 class CaptionSettings extends PluginSettingTab {
   constructor(app, plugin) { super(app, plugin); this.plugin = plugin; }
   display() {
@@ -501,6 +554,12 @@ class CaptionSettings extends PluginSettingTab {
     new Setting(el).setName('Zotero 与引用配置').setDesc('检查引用插件、Pandoc、文献库和 CSL；Windows 与 macOS 使用同一个插件包，各自配置本机路径。')
       .addButton(b=>b.setButtonText('检查配置').onClick(()=>this.plugin.checkCitationSetup()))
       .addButton(b=>b.setButtonText('打开引用设置').onClick(()=>this.plugin.openCitationSettings()));
+    new Setting(el).setName('稿件性能模式').setDesc('自动：达到 8 万字符或约 60 个图片标记时启用大稿件模式。大稿件输入期间暂缓全文解析，停笔约 1.2 秒后更新编号与检查；不会更改稿件内容。')
+      .addDropdown(d=>d.addOptions({auto:'自动（推荐）',normal:'普通',large:'大稿件'}).setValue(this.plugin.settings.performanceMode).onChange(async value=>{
+        await this.plugin.setPerformanceMode(value);
+      }));
+    new Setting(el).setName('全文检查与刷新').setDesc('立即更新当前稿件的图表编号、空行和虚假上下标检查。')
+      .addButton(b=>b.setButtonText('立即检查').onClick(()=>this.plugin.checkWholeDocument()));
     new Setting(el).setName('正在调整的外观').setDesc('中英文各自保存字号、行距、段间距、颜色、图注和表格外观。')
       .addDropdown(d=>d.addOptions({zh:'中文稿样式',en:'英文稿样式'}).setValue(this.editLanguage).onChange(v=>{this.editLanguage=v;this.display();}));
     const preview = el.createDiv({cls: 'pcp-appearance-preview'});
@@ -648,6 +707,7 @@ module.exports = class PaperCaptionPreview extends Plugin {
   async onload() {
     this.disposed = false;
     this.settings = Object.assign({}, JSON.parse(JSON.stringify(DEFAULTS)), await this.loadData());
+    this.analysisCache = new Map(); this.sizeSnapshots = new Map(); this.languageCache = new Map(); this.largePending = new Map();
     this.imageDimensions = new Map();
     this.nativeImages = new Set();
     this.citations = new CitationBridge(this);
@@ -660,6 +720,13 @@ module.exports = class PaperCaptionPreview extends Plugin {
     this.field = StateField.define({
       create: state => buildDecorations(this, state),
       update: (previous, transaction) => {
+        const force = transaction.reconfigured || transaction.effects.some(effect => effect.is(refreshEffect));
+        if (!force && (transaction.docChanged || transaction.selection) &&
+          transaction.state.field(editorLivePreviewField,false) && !this.conflict() &&
+          this.performanceFor(transaction.state.doc,transaction.state.field(editorInfoField,false)?.file).large) {
+          this.queueLargeRefresh(transaction.state, transaction.docChanged);
+          return mapLargeDecorations(previous,transaction);
+        }
         if (transaction.docChanged || transaction.selection || transaction.reconfigured ||
           transaction.effects.some(effect => effect.is(refreshEffect))) return buildDecorations(this, transaction.state);
         return previous;
@@ -670,6 +737,13 @@ module.exports = class PaperCaptionPreview extends Plugin {
     this.referenceSuggest = new ReferenceSuggest(this.app);
     this.registerEditorSuggest(this.referenceSuggest);
     this.blankStatus = this.addStatusBarItem();
+    this.performanceStatus = this.addStatusBarItem();
+    this.performanceStatus.classList.add('pcp-performance-status');
+    this.performanceStatus.setAttribute('role','button'); this.performanceStatus.setAttribute('tabindex','0');
+    this.registerDomEvent(this.performanceStatus,'click',()=>this.selectPerformanceMode());
+    this.registerDomEvent(this.performanceStatus,'keydown',event=>{
+      if(event.key==='Enter'||event.key===' '){event.preventDefault();this.selectPerformanceMode();}
+    });
     this.scriptStatus = this.addStatusBarItem();
     this.scriptStatus.classList.add('pcp-script-status');
     this.scriptStatus.setAttribute('role', 'button'); this.scriptStatus.setAttribute('tabindex', '0');
@@ -691,6 +765,13 @@ module.exports = class PaperCaptionPreview extends Plugin {
     });
     this.registerEvent(this.app.workspace.on('editor-change', (_editor, info) => {
       globalThis.clearTimeout(this.blankStatusTimer);
+      const view=info?.editor && info?.file ? info : this.markdownView();
+      const doc=view?.editor?.cm?.state?.doc;
+      if (doc && this.performanceFor(doc,view.file).large) {
+        this.queueLargeRefresh(view.editor.cm.state,true);
+        this.updateBlankStatus(view);
+        return;
+      }
       this.blankStatusTimer = globalThis.setTimeout(() => {this.updateBlankStatus(info?.editor && info?.file ? info : undefined);this.applyAppearance();}, 200);
     }));
     this.addSettingTab(new CaptionSettings(this.app, this));
@@ -702,6 +783,8 @@ module.exports = class PaperCaptionPreview extends Plugin {
     }});
     this.addCommand({id: 'fix-blank-lines', name: '补全缺失空行', callback: () => this.fixBlankLines()});
     this.addCommand({id: 'fix-fake-scripts', name: '检查并修复虚假上下标', callback: () => this.fixFakeScripts()});
+    this.addCommand({id:'performance-mode',name:'选择稿件性能模式',callback:()=>this.selectPerformanceMode()});
+    this.addCommand({id:'check-whole-document',name:'全文检查与刷新',callback:()=>this.checkWholeDocument()});
     this.addCommand({id: 'diagnose-captions', name: '检查当前笔记图注', callback: () => this.diagnose()});
     this.addCommand({id: 'figure-navigation', name: '图表与公式导航', callback: () => this.openNavigation()});
     this.addRibbonIcon?.('list-tree', '图表与公式导航', () => this.openNavigation());
@@ -742,17 +825,93 @@ module.exports = class PaperCaptionPreview extends Plugin {
     }, 2000));
     if (this.conflict()) new Notice('Paper Writing View：旧 Pandoc Live Preview 尚未安装兼容补丁，已暂停重复渲染。');
   }
+  documentAnalysis(doc) {
+    if (this.analysisCache.has(doc)) return this.analysisCache.get(doc);
+    const text=doc.toString();
+    const analysis={text,parsed:scanDocument(text),lines:maskExamples(text).split('\n'),rawLines:text.split('\n'),
+      imageCount:(text.match(/!\[/g)||[]).length};
+    this.analysisCache.set(doc,analysis);
+    while(this.analysisCache.size>4)this.analysisCache.delete(this.analysisCache.keys().next().value);
+    return analysis;
+  }
+  rememberSize(file,doc,imageCount) {
+    if(!file?.path)return;
+    this.sizeSnapshots.set(file.path,{doc,imageCount});
+    while(this.sizeSnapshots.size>12)this.sizeSnapshots.delete(this.sizeSnapshots.keys().next().value);
+  }
+  performanceFor(doc,file) {
+    const snapshot=this.sizeSnapshots.get(file?.path);
+    const length=doc?.length ?? doc?.toString().length ?? 0;
+    let images=snapshot?.imageCount;
+    if(images==null){images=(doc?.toString().match(/!\[/g)||[]).length;this.rememberSize(file,doc,images);}
+    return performanceDecision(this.settings.performanceMode,length,images);
+  }
+  queueLargeRefresh(state,dirty=false) {
+    const path=state.field(editorInfoField,false)?.file?.path;
+    if(!path || this.disposed)return;
+    const previous=this.largePending.get(path);
+    globalThis.clearTimeout(previous?.timer);
+    const entry={dirty:dirty || !!previous?.dirty};
+    this.largePending.set(path,entry);
+    entry.timer=globalThis.setTimeout(()=>{
+      if(this.disposed || this.largePending.get(path)!==entry)return;
+      const views=this.app.workspace.getLeavesOfType('markdown').map(l=>l.view).filter(v=>v.file?.path===path && v.editor?.cm?.state);
+      const composing=views.find(v=>v.editor.cm.composing);
+      if(composing){this.queueLargeRefresh(composing.editor.cm.state,entry.dirty);return;}
+      this.largePending.delete(path);
+      for(const view of views)view.editor.cm.dispatch({effects:refreshEffect.of(null)});
+      this.updateBlankStatus();this.applyAppearance();this.queueTables();
+    },entry.dirty?1200:180);
+  }
+  async setPerformanceMode(value) {
+    this.settings.performanceMode=['normal','large'].includes(value)?value:'auto';
+    for(const entry of this.largePending.values())globalThis.clearTimeout(entry.timer);
+    this.largePending.clear();
+    await this.saveData(this.settings);this.refresh();
+  }
+  selectPerformanceMode() {
+    const modal=new Modal(this.app),view=this.markdownView(),doc=view?.editor?.cm?.state?.doc || view?.editor?.getValue() || '';
+    const decision=this.performanceFor(doc,view?.file);
+    modal.contentEl.createEl('h2',{text:'稿件性能模式'});
+    modal.contentEl.createEl('p',{text:`当前：${decision.large?'大稿件':'普通'}；${decision.length.toLocaleString()} 字符，最近解析约 ${decision.imageCount} 个图片标记。${decision.reason}。`});
+    modal.contentEl.createEl('p',{text:'大稿件输入期间保留已有排版，编辑处暂时显示源码；停笔约 1.2 秒后更新全文。全文检查和首次打开仍需解析一次，不会修改稿件或导出格式。此选择应用到整个库。'});
+    for(const [value,label] of [['auto','自动（推荐）'],['normal','普通'],['large','大稿件']])
+      new Setting(modal.contentEl).setName(label).addButton(b=>b.setButtonText(this.settings.performanceMode===value?'当前选择':'使用').onClick(async()=>{
+        await this.setPerformanceMode(value);modal.close();
+      }));
+    modal.contentEl.createEl('button',{text:'立即全文检查'}).onclick=()=>{modal.close();this.checkWholeDocument();};
+    modal.open();return modal;
+  }
+  checkWholeDocument(sourceView) {
+    const view=sourceView || this.markdownView();
+    if(!view?.file || !view.editor)return new Notice('请先打开 Markdown 笔记。');
+    if(view.editor.cm?.composing)return new Notice('请先完成当前输入，再运行全文检查。');
+    globalThis.clearTimeout(this.largePending.get(view.file.path)?.timer);this.largePending.delete(view.file.path);
+    if(view.editor.cm?.state)view.editor.cm.dispatch({effects:refreshEffect.of(null)});
+    this.updateBlankStatus(view);this.applyAppearance();this.queueTables();
+    new Notice('当前稿件全文检查与排版已刷新。');
+  }
   updateBlankStatus(sourceView) {
     if (this.disposed || !this.blankStatus) return;
     const view = sourceView || this.markdownView();
     this.blankStatusView = view;
+    const pending=!!this.largePending.get(view?.file?.path)?.dirty;
+    if(this.performanceStatus){
+      this.performanceStatus.style.display=view?.file&&view.editor?'':'none';
+      if(view?.file&&view.editor){
+        const mode=this.performanceFor(view.editor.cm?.state?.doc || view.editor.getValue(),view.file);
+        this.performanceStatus.setText(`${mode.large?'大稿件':'普通'} · ${mode.mode==='auto'?'自动':'手动'}${pending?' · 待检查':''}`);
+        this.performanceStatus.setAttribute('title',mode.reason+'；点击选择模式或立即检查全文');
+      }
+    }
+    const analysis=view?.file&&view.editor&&!pending ? this.documentAnalysis(view.editor.cm?.state?.doc || view.editor.getValue()) : null;
     if (this.scriptStatus) {
       this.scriptStatus.style.display = view?.file && view.editor && this.settings.fakeScriptWarnings ? '' : 'none';
       if (view?.file && view.editor && this.settings.fakeScriptWarnings) {
-        const count = fakeScriptViolations(view.editor.getValue()).length;
-        this.scriptStatus.setText(count ? `虚假上下标 ${count} 处 · 点击检查` : '上下标检查 ✓');
+        const count = pending ? 0 : (analysis.scripts ??= fakeScriptViolations(analysis.text)).length;
+        this.scriptStatus.setText(pending ? '上下标待检查' : count ? `虚假上下标 ${count} 处 · 点击检查` : '上下标检查 ✓');
         this.scriptStatus.classList.toggle('pcp-has-script-issues', count > 0);
-        this.scriptStatus.setAttribute('aria-label', count ? `发现 ${count} 处虚假上下标，打开修复预览` : '未发现 Unicode 虚假上下标');
+        this.scriptStatus.setAttribute('aria-label', pending ? '输入后等待检查，点击立即检查' : count ? `发现 ${count} 处虚假上下标，打开修复预览` : '未发现 Unicode 虚假上下标');
         this.scriptStatus.setAttribute('title', view.file.path + '\n检查 Unicode 上下标；不检查普通数字和公式，不会自动修改正文');
       }
     }
@@ -761,17 +920,17 @@ module.exports = class PaperCaptionPreview extends Plugin {
       this.languageStatus.style.display=view?.file&&view.editor?'':'none';
       if(view?.file&&view.editor){
         const manual=['en','zh'].includes(this.settings.manuscriptLanguages[view.file.path]);
-        this.languageStatus.setText((this.languageFor(view.file,view.editor.getValue())==='en'?'英文稿':'中文稿')+' · '+(manual?'手动':'自动'));
-        const decision=this.languageDecisionFor(view.file,view.editor.getValue());
+        this.languageStatus.setText((this.languageFor(view.file,analysis?.text || '')==='en'?'英文稿':'中文稿')+' · '+(manual?'手动':'自动'));
+        const decision=this.languageDecisionFor(view.file,analysis?.text || '');
         this.languageStatus.setAttribute('title',view.file.path+'\n识别依据：'+decision.source+(decision.uncertain?'；正文较短或中英混排，建议手动确认':'')+'\n点击选择稿件语言');
       }
     }
     if (!view?.file || !view.editor) { this.blankStatus.style.display = 'none'; return; }
     this.blankStatus.style.display = '';
-    const count = blankLineViolations(view.editor.getValue()).violations.length;
-    this.blankStatus.setText(count ? `缺空行 ${count} 处 · 点击检查` : '空行检查 ✓');
+    const count = pending ? 0 : (analysis.blanks ??= blankLineViolations(analysis.text).violations).length;
+    this.blankStatus.setText(pending ? '空行待检查' : count ? `缺空行 ${count} 处 · 点击检查` : '空行检查 ✓');
     this.blankStatus.classList.toggle('pcp-has-blank-issues', count > 0);
-    this.blankStatus.setAttribute('aria-label', count ? `缺少 ${count} 处空行，打开修复预览` : '未发现缺失空行');
+    this.blankStatus.setAttribute('aria-label', pending ? '输入后等待检查，点击立即检查' : count ? `缺少 ${count} 处空行，打开修复预览` : '未发现缺失空行');
     this.blankStatus.setAttribute('title', view.file.path + '\n点击预览缺失空行；不会自动修改正文');
   }
   legacy() { return this.app.plugins?.plugins['pandoc-live-preview']; }
@@ -785,7 +944,14 @@ module.exports = class PaperCaptionPreview extends Plugin {
     return this.languageDecisionFor(file,text).language;
   }
   languageDecisionFor(file,text='') {
-    return languageDecision(file?this.app.metadataCache.getFileCache(file)?.frontmatter:{},text,this.settings.manuscriptLanguages?.[file?.path]);
+    const fm=file?this.app.metadataCache.getFileCache(file)?.frontmatter:{};
+    const manual=this.settings.manuscriptLanguages?.[file?.path],signature=JSON.stringify([fm?.lang,fm?.['citation-language'],fm?.cssclasses,manual]);
+    const path=file?.path || '',previous=this.languageCache.get(path);
+    if(previous?.signature===signature && (previous.text===text || this.largePending.get(path)?.dirty))return previous.decision;
+    const decision=languageDecision(fm,text,manual);
+    this.languageCache.set(path,{text,signature,decision});
+    while(this.languageCache.size>12)this.languageCache.delete(this.languageCache.keys().next().value);
+    return decision;
   }
   appearanceEditor(language) {
     return new Proxy(this.settings,{
@@ -920,6 +1086,8 @@ module.exports = class PaperCaptionPreview extends Plugin {
     for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
       const root=leaf.view.containerEl;
       for (const host of root.querySelectorAll('.image-embed')) {
+        const nativeImage=host.querySelector('img');
+        if(nativeImage){nativeImage.loading='lazy';nativeImage.decoding='async';}
         if (!host.querySelector('img') || host.closest('.pcp-figure') || host.querySelector('.pcp-native-toolbar')) continue;
         host.classList.add('pcp-unified-native'); host.closest('.cm-embed-block')?.classList.add('pcp-unified-block'); this.nativeImages.add(host);
         const toolbar=host.ownerDocument.createElement('span');toolbar.className='pcp-image-toolbar pcp-native-toolbar';
@@ -990,6 +1158,7 @@ module.exports = class PaperCaptionPreview extends Plugin {
     for (const [span] of this.tableOriginals) if (!span.isConnected) this.tableOriginals.delete(span);
     for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
       const view = leaf.view, root = view.containerEl;
+      if(this.largePending.get(view.file?.path)?.dirty)continue;
       if (!this.settings.optimizeTables || !this.settings.citations) { this.restoreTableCitations(root); continue; }
       // Never modify active cell editors: their raw text belongs to CodeMirror.
       const tables = [...root.querySelectorAll('.cm-content table, .markdown-preview-view table')];
@@ -1034,6 +1203,7 @@ module.exports = class PaperCaptionPreview extends Plugin {
   applyAppearance() {
     for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
       const root = leaf.view.containerEl;
+      if(this.largePending.get(leaf.view.file?.path)?.dirty)continue;
       let changed=root.classList.contains('pcp-word-spacing')!==!!this.settings.wordSpacing;
       root.classList.toggle('pcp-word-spacing', this.settings.wordSpacing);
       const fm={lang:this.languageFor(leaf.view.file,leaf.view.editor?.getValue()||'')==='en'?'en-US':'zh-CN'};
@@ -1083,7 +1253,8 @@ module.exports = class PaperCaptionPreview extends Plugin {
         }, true);
       }
       const cm = leaf.view.editor?.cm;
-      if (cm?.dispatch && cm.state) cm.dispatch({effects: refreshEffect.of(null), selection: cm.state.selection});
+      if (cm?.dispatch && cm.state && !this.largePending.get(leaf.view.file?.path)?.dirty)
+        cm.dispatch({effects: refreshEffect.of(null), selection: cm.state.selection});
     }
     for (const [root, observer] of this.tableObservers) if (!root.isConnected) { observer.disconnect(); this.tableObservers.delete(root); }
     this.queueTables();
@@ -1135,18 +1306,17 @@ module.exports = class PaperCaptionPreview extends Plugin {
       this.updateBlankStatus(view);
       modal.close(); new Notice(`已修复 ${chosen.length} 处虚假上下标（可 Ctrl+Z / Cmd+Z 撤销）`);
     };
-    const list = modal.contentEl.createDiv({cls: 'pcp-review-list'});
-    for (const issue of issues) {
-      const row = list.createDiv({cls: 'pcp-review-row'}), label = row.createEl('label');
-      const check = label.createEl('input', {attr: {type: 'checkbox'}}); check.checked = true;
-      check.onchange = () => check.checked ? selected.add(issue) : selected.delete(issue);
+    reviewList(modal.contentEl,issues,selected,(row,issue,describe)=>{
+      const label = row.createEl('label');
+      const check = label.createEl('input', {attr: {type: 'checkbox'}}); check.checked = selected.has(issue);
+      check.onchange = () => {check.checked ? selected.add(issue) : selected.delete(issue);describe();};
       label.appendText(` 第 ${issue.line+1} 行，第 ${issue.column+1} 列：${issue.original} → ${issue.replacement}`);
       row.createEl('pre', {text: lines[issue.line]});
       row.createEl('button', {text: '仅修此处'}).onclick = () => apply([issue]);
       row.createEl('button', {text: '定位'}).onclick = () => {
         modal.close(); editor.setSelection(editor.offsetToPos(issue.from), editor.offsetToPos(issue.to)); editor.focus();
       };
-    }
+    });
     const controls = modal.contentEl.createDiv({cls: 'pcp-zoom-controls'});
     controls.createEl('button', {text: '修复所选'}).onclick = () => apply([...selected]);
     controls.createEl('button', {text: '全部修复'}).onclick = () => apply(issues);
@@ -1181,16 +1351,14 @@ module.exports = class PaperCaptionPreview extends Plugin {
       modal.close(); new Notice(`已补全 ${chosen.length} 处缺失空行（可 Ctrl+Z 撤销）`);
     };
     const names = {prose: '正文', image: '图片', tablecap: '表名', tablerow: '表格', heading: '标题'};
-    const list = modal.contentEl.createDiv({cls: 'pcp-review-list'});
-    for (const v of violations) {
-      const row = list.createDiv({cls: 'pcp-review-row'});
-      const label = row.createEl('label'), check = label.createEl('input', {attr: {type: 'checkbox'}}); check.checked = true;
-      check.onchange = () => check.checked ? selected.add(v) : selected.delete(v);
+    reviewList(modal.contentEl,violations,selected,(row,v,describe)=>{
+      const label = row.createEl('label'), check = label.createEl('input', {attr: {type: 'checkbox'}}); check.checked = selected.has(v);
+      check.onchange = () => {check.checked ? selected.add(v) : selected.delete(v);describe();};
       label.appendText(` 第 ${v.line+1} 行：${names[v.prev]}后直接跟${names[v.cur]}`);
       row.createEl('pre', {text: lines.slice(Math.max(0,v.line-1), v.line+1).join('\n')});
       row.createEl('button', {text: '仅补此处'}).onclick = () => apply([v]);
       row.createEl('button', {text: '定位'}).onclick = () => { modal.close(); editor.setCursor(editor.offsetToPos(v.from)); editor.focus(); };
-    }
+    });
     const controls = modal.contentEl.createDiv({cls: 'pcp-zoom-controls'});
     controls.createEl('button', {text: '补齐所选'}).onclick = () => apply([...selected]);
     controls.createEl('button', {text: '全部补齐'}).onclick = () => apply(violations);
@@ -1221,6 +1389,8 @@ module.exports = class PaperCaptionPreview extends Plugin {
     this.restoreScopedCitationPaths?.();
     this.disposed = true; globalThis.clearTimeout(this.refreshTimer); globalThis.clearTimeout(this.tableTimer);
     globalThis.clearTimeout(this.blankStatusTimer);
+    for(const entry of this.largePending.values())globalThis.clearTimeout(entry.timer);
+    this.largePending.clear();this.analysisCache.clear();this.languageCache.clear();this.sizeSnapshots.clear();
     for (const host of this.nativeImages) { host.querySelector('.pcp-native-toolbar')?.remove();host.classList.remove('pcp-unified-native');host.closest('.cm-embed-block')?.classList.remove('pcp-unified-block'); }
     this.nativeImages.clear(); this.imageDimensions.clear();
     for (const observer of this.tableObservers.values()) observer.disconnect();
