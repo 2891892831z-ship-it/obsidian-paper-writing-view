@@ -335,9 +335,10 @@ function fakeScriptViolations(text) {
 }
 
 function performanceDecision(mode, length, imageCount = 0) {
-  const large = mode === 'large' || (mode !== 'normal' && (length >= 80000 || imageCount >= 60));
-  return {large, mode:['normal','large'].includes(mode)?mode:'auto', length, imageCount,
-    reason:mode === 'large' ? '手动选择' : mode === 'normal' ? '手动选择' :
+  const large = mode === 'lite' || mode === 'large' || (mode !== 'normal' && (length >= 80000 || imageCount >= 60));
+  return {large, lite:large,
+    mode:['normal','large','lite'].includes(mode)?mode:'auto', length, imageCount,
+    reason:mode === 'lite' || mode === 'large' ? '手动选择' : mode === 'normal' ? '手动选择' :
       length >= 80000 ? '正文达到 8 万字符' : imageCount >= 60 ? '图片标记达到 60 处' : '未达到大稿件阈值'};
 }
 
@@ -521,6 +522,7 @@ class CitationBridge {
     return result;
   }
   ensure(file, text) {
+    if (this.plugin.isLiteFile(file)) return;
     if (this.plugin.largePending?.has(file?.path)) return;
     const manager = this.manager();
     if (!manager?.getReferenceList || !file || !text.includes('[@')) return;
@@ -730,6 +732,7 @@ function buildDecorations(plugin, state) {
   if (!state.field(editorLivePreviewField, false) || plugin.disposed || plugin.conflict()) return Decoration.none;
   const info = state.field(editorInfoField, false), file = info?.file;
   if (!file) return Decoration.none;
+  if (plugin.performanceFor(state.doc,file).lite) return Decoration.none;
   const analysis = plugin.documentAnalysis(state.doc), {text, parsed} = analysis, widgets = [];
   plugin.rememberSize(file, state.doc, analysis.imageCount);
   if (plugin.settings.citations) plugin.citations.ensure(file, text);
@@ -841,31 +844,6 @@ function buildDecorations(plugin, state) {
   return Decoration.set(widgets, true);
 }
 
-function mapLargeDecorations(previous, transaction) {
-  const changed = [];
-  if (transaction.docChanged) transaction.changes.iterChangedRanges((from, to) => {
-    changed.push({from:transaction.startState.doc.lineAt(from).from, to:transaction.startState.doc.lineAt(to).to});
-  });
-  let mapped = previous.update({filter:(from,to) => !changed.some(r => from <= r.to && to >= r.from)}).map(transaction.changes);
-  const mapWidget = widget => {
-    if (widget?.items) {widget.items.forEach(mapWidget); return;}
-    if (!widget?.figure) return;
-    const figure = {...widget.figure};
-    for (const key of ['from','to','groupFrom','groupTo','imageTo']) if (Number.isInteger(figure[key]))
-      figure[key] = transaction.changes.mapPos(figure[key], key === 'to' || key === 'groupTo' || key === 'imageTo' ? -1 : 1);
-    widget.figure = figure;
-    if (widget.domPeer) widget.domPeer.figure = figure;
-  };
-  mapped.between(0,transaction.state.doc.length,(_from,_to,value) => mapWidget(value.spec.widget));
-  // Reveal source immediately at the caret; restore hidden widgets after the idle refresh.
-  return mapped.update({filter:(from,to,value) => !value.spec.widget ||
-    !transaction.state.selection.ranges.some(r => {
-      const start = value.spec.block ? transaction.state.doc.lineAt(from).from : from;
-      const end = value.spec.block ? transaction.state.doc.lineAt(to).to : to;
-      return r.from <= end && r.to >= start;
-    })});
-}
-
 function reviewList(content, items, selected, renderRow) {
   const paged=items.length>100, pager=paged?content.createDiv({cls:'pcp-zoom-controls'}):null;
   const list=content.createDiv({cls:'pcp-review-list'});
@@ -898,11 +876,11 @@ class CaptionSettings extends PluginSettingTab {
     new Setting(el).setName('Zotero 与引用配置').setDesc('检查引用插件、Pandoc、文献库和 CSL；Windows 与 macOS 使用同一个插件包，各自配置本机路径。')
       .addButton(b=>b.setButtonText('检查配置').onClick(()=>this.plugin.checkCitationSetup()))
       .addButton(b=>b.setButtonText('打开引用设置').onClick(()=>this.plugin.openCitationSettings()));
-    new Setting(el).setName('稿件性能模式').setDesc('自动：达到 8 万字符或约 60 个图片标记时启用大稿件模式。大稿件输入期间暂缓全文解析，停笔约 1.2 秒后更新编号与检查；不会更改稿件内容。')
-      .addDropdown(d=>d.addOptions({auto:'自动（推荐）',normal:'普通',large:'大稿件'}).setValue(this.plugin.settings.performanceMode).onChange(async value=>{
+    new Setting(el).setName('稿件性能模式').setDesc('自动：达到 8 万字符或约 60 个图片标记时启用轻量写作：暂停复杂图注、交叉引用替换和自动全文检查；手动检查仍可用。不会更改稿件内容。')
+      .addDropdown(d=>d.addOptions({auto:'自动（大稿件优先轻量）',normal:'普通',lite:'轻量写作（手动检查）'}).setValue(this.plugin.settings.performanceMode==='large'?'lite':this.plugin.settings.performanceMode).onChange(async value=>{
         await this.plugin.setPerformanceMode(value);
       }));
-    new Setting(el).setName('全文检查与刷新').setDesc('立即更新当前稿件的图表编号、空行和虚假上下标检查。')
+    new Setting(el).setName('全文检查与刷新').setDesc('立即检查空行和虚假上下标；普通模式同时更新图表预览。轻量写作保持原生显示。')
       .addButton(b=>b.setButtonText('立即检查').onClick(()=>this.plugin.checkWholeDocument()));
     new Setting(el).setName('正在调整的外观').setDesc('中英文各自保存字号、行距、段间距、颜色、图注和表格外观。')
       .addDropdown(d=>d.addOptions({zh:'中文稿样式',en:'英文稿样式'}).setValue(this.editLanguage).onChange(v=>{this.editLanguage=v;this.display();}));
@@ -1064,13 +1042,8 @@ module.exports = class PaperCaptionPreview extends Plugin {
     this.field = StateField.define({
       create: state => buildDecorations(this, state),
       update: (previous, transaction) => {
-        const force = transaction.reconfigured || transaction.effects.some(effect => effect.is(refreshEffect));
-        if (!force && (transaction.docChanged || transaction.selection) &&
-          transaction.state.field(editorLivePreviewField,false) && !this.conflict() &&
-          this.performanceFor(transaction.state.doc,transaction.state.field(editorInfoField,false)?.file).large) {
-          this.queueLargeRefresh(transaction.state, transaction.docChanged);
-          return mapLargeDecorations(previous,transaction);
-        }
+        const file=transaction.state.field(editorInfoField,false)?.file;
+        if (this.performanceFor(transaction.state.doc,file).lite) return Decoration.none;
         if (transaction.docChanged || transaction.selection || transaction.reconfigured ||
           transaction.effects.some(effect => effect.is(refreshEffect))) return buildDecorations(this, transaction.state);
         return previous;
@@ -1111,9 +1084,8 @@ module.exports = class PaperCaptionPreview extends Plugin {
       globalThis.clearTimeout(this.blankStatusTimer);
       const view=info?.editor && info?.file ? info : this.markdownView();
       const doc=view?.editor?.cm?.state?.doc;
-      if (doc && this.performanceFor(doc,view.file).large) {
-        this.queueLargeRefresh(view.editor.cm.state,true);
-        this.updateBlankStatus(view);
+      if(doc && this.performanceFor(doc,view.file).lite){
+        this.queueLiteStatus(view);
         return;
       }
       this.blankStatusTimer = globalThis.setTimeout(() => {this.updateBlankStatus(info?.editor && info?.file ? info : undefined);this.applyAppearance();}, 200);
@@ -1128,6 +1100,7 @@ module.exports = class PaperCaptionPreview extends Plugin {
     this.addCommand({id: 'fix-blank-lines', name: '补全缺失空行', callback: () => this.fixBlankLines()});
     this.addCommand({id: 'fix-fake-scripts', name: '检查并修复虚假上下标', callback: () => this.fixFakeScripts()});
     this.addCommand({id:'performance-mode',name:'选择稿件性能模式',callback:()=>this.selectPerformanceMode()});
+    this.addCommand({id:'lightweight-writing',name:'启用轻量写作（卡顿时使用）',callback:()=>this.setPerformanceMode('lite')});
     this.addCommand({id:'check-whole-document',name:'全文检查与刷新',callback:()=>this.checkWholeDocument()});
     this.addCommand({id: 'diagnose-captions', name: '检查当前笔记图注', callback: () => this.diagnose()});
     this.addCommand({id: 'figure-navigation', name: '图表与公式导航', callback: () => this.openNavigation()});
@@ -1184,31 +1157,27 @@ module.exports = class PaperCaptionPreview extends Plugin {
     while(this.sizeSnapshots.size>12)this.sizeSnapshots.delete(this.sizeSnapshots.keys().next().value);
   }
   performanceFor(doc,file) {
+    if(this.settings.performanceMode==='lite')return performanceDecision('lite',doc?.length??0,0);
     const snapshot=this.sizeSnapshots.get(file?.path);
     const length=doc?.length ?? doc?.toString().length ?? 0;
     let images=snapshot?.imageCount;
     if(images==null){images=(doc?.toString().match(/!\[/g)||[]).length;this.rememberSize(file,doc,images);}
+    else if(snapshot.doc!==doc)this.rememberSize(file,doc,images);
     return performanceDecision(this.settings.performanceMode,length,images);
   }
-  queueLargeRefresh(state,dirty=false) {
-    const path=state.field(editorInfoField,false)?.file?.path;
-    if(!path || this.disposed)return;
-    const previous=this.largePending.get(path);
-    globalThis.clearTimeout(previous?.timer);
-    const entry={dirty:dirty || !!previous?.dirty};
-    this.largePending.set(path,entry);
-    entry.timer=globalThis.setTimeout(()=>{
-      if(this.disposed || this.largePending.get(path)!==entry)return;
-      const views=this.app.workspace.getLeavesOfType('markdown').map(l=>l.view).filter(v=>v.file?.path===path && v.editor?.cm?.state);
-      const composing=views.find(v=>v.editor.cm.composing);
-      if(composing){this.queueLargeRefresh(composing.editor.cm.state,entry.dirty);return;}
-      this.largePending.delete(path);
-      for(const view of views)view.editor.cm.dispatch({effects:refreshEffect.of(null)});
-      this.updateBlankStatus();this.applyAppearance();this.queueTables();
-    },entry.dirty?1200:180);
+  isLiteFile(file) {
+    if(this.settings.performanceMode==='lite')return true;
+    const snapshot=this.sizeSnapshots.get(file?.path);
+    return !!snapshot && performanceDecision(this.settings.performanceMode,snapshot.doc?.length ?? 0,snapshot.imageCount).lite;
+  }
+  queueLiteStatus(view) {
+    globalThis.clearTimeout(this.blankStatusTimer);
+    this.blankStatusTimer=globalThis.setTimeout(()=>{
+      if(!this.disposed)this.updateBlankStatus(view);
+    },250);
   }
   async setPerformanceMode(value) {
-    this.settings.performanceMode=['normal','large'].includes(value)?value:'auto';
+    this.settings.performanceMode=value==='large'?'lite':['normal','lite'].includes(value)?value:'auto';
     for(const entry of this.largePending.values())globalThis.clearTimeout(entry.timer);
     this.largePending.clear();
     await this.saveData(this.settings);this.refresh();
@@ -1217,9 +1186,10 @@ module.exports = class PaperCaptionPreview extends Plugin {
     const modal=new Modal(this.app),view=this.markdownView(),doc=view?.editor?.cm?.state?.doc || view?.editor?.getValue() || '';
     const decision=this.performanceFor(doc,view?.file);
     modal.contentEl.createEl('h2',{text:'稿件性能模式'});
-    modal.contentEl.createEl('p',{text:`当前：${decision.large?'大稿件':'普通'}；${decision.length.toLocaleString()} 字符，最近解析约 ${decision.imageCount} 个图片标记。${decision.reason}。`});
-    modal.contentEl.createEl('p',{text:'大稿件输入期间保留已有排版，编辑处暂时显示源码；停笔约 1.2 秒后更新全文。全文检查和首次打开仍需解析一次，不会修改稿件或导出格式。此选择应用到整个库。'});
-    for(const [value,label] of [['auto','自动（推荐）'],['normal','普通'],['large','大稿件']])
+    modal.contentEl.createEl('p',{text:`当前：${decision.lite?'轻量写作':decision.large?'大稿件':'普通'}；${decision.length.toLocaleString()} 字符。${decision.reason}。`});
+    modal.contentEl.createEl('p',{text:'卡顿时优先选择轻量写作：保留字体、行距、原生图片与表格样式；暂停复杂图注、交叉引用显示替换和自动全文检查。检查由你手动触发，避免打字或停笔时重建全文。'});
+    modal.contentEl.createEl('p',{text:'旧版“大稿件”选择同样启用轻量路径。模式应用到整个库，不修改正文或导出格式。'});
+    for(const [value,label] of [['lite','轻量写作（卡顿时推荐）'],['auto','自动（大稿件优先轻量）'],['normal','普通']])
       new Setting(modal.contentEl).setName(label).addButton(b=>b.setButtonText(this.settings.performanceMode===value?'当前选择':'使用').onClick(async()=>{
         await this.setPerformanceMode(value);modal.close();
       }));
@@ -1232,23 +1202,24 @@ module.exports = class PaperCaptionPreview extends Plugin {
     if(view.editor.cm?.composing)return new Notice('请先完成当前输入，再运行全文检查。');
     globalThis.clearTimeout(this.largePending.get(view.file.path)?.timer);this.largePending.delete(view.file.path);
     if(view.editor.cm?.state)view.editor.cm.dispatch({effects:refreshEffect.of(null)});
-    this.updateBlankStatus(view);this.applyAppearance();this.queueTables();
-    new Notice('当前稿件全文检查与排版已刷新。');
+    this.updateBlankStatus(view,true);this.applyAppearance();this.queueTables();
+    new Notice(this.isLiteFile(view.file)?'已检查空行和上下标；轻量写作保持原生显示。':'当前稿件全文检查与排版已刷新。');
   }
-  updateBlankStatus(sourceView) {
+  updateBlankStatus(sourceView, forceChecks=false) {
     if (this.disposed || !this.blankStatus) return;
     const view = sourceView || this.markdownView();
     this.blankStatusView = view;
-    const pending=!!this.largePending.get(view?.file?.path)?.dirty;
+    const lite=view?.file&&view.editor&&this.performanceFor(view.editor.cm?.state?.doc || view.editor.getValue(),view.file).lite;
+    const pending=!!this.largePending.get(view?.file?.path)?.dirty || !!lite && !forceChecks;
     if(this.performanceStatus){
       this.performanceStatus.style.display=view?.file&&view.editor?'':'none';
       if(view?.file&&view.editor){
         const mode=this.performanceFor(view.editor.cm?.state?.doc || view.editor.getValue(),view.file);
-        this.performanceStatus.setText(`${mode.large?'大稿件':'普通'} · ${mode.mode==='auto'?'自动':'手动'}${pending?' · 待检查':''}`);
+        this.performanceStatus.setText(`${mode.lite?'轻量写作':mode.large?'大稿件':'普通'} · ${mode.mode==='auto'?'自动':'手动'}${pending?' · 手动检查':''}`);
         this.performanceStatus.setAttribute('title',mode.reason+'；点击选择模式或立即检查全文');
       }
     }
-    const analysis=view?.file&&view.editor&&!pending ? this.documentAnalysis(view.editor.cm?.state?.doc || view.editor.getValue()) : null;
+    const analysis=view?.file&&view.editor&&!pending ? lite ? {text:view.editor.getValue()} : this.documentAnalysis(view.editor.cm?.state?.doc || view.editor.getValue()) : null;
     if (this.scriptStatus) {
       this.scriptStatus.style.display = view?.file && view.editor && this.settings.fakeScriptWarnings ? '' : 'none';
       if (view?.file && view.editor && this.settings.fakeScriptWarnings) {
@@ -1263,9 +1234,12 @@ module.exports = class PaperCaptionPreview extends Plugin {
     if(this.languageStatus) {
       this.languageStatus.style.display=view?.file&&view.editor?'':'none';
       if(view?.file&&view.editor){
+        const doc=view.editor.cm?.state?.doc;
+        const languageText=analysis?.text ?? this.languageCache.get(view.file.path)?.text ??
+          (doc?.sliceString ? doc.sliceString(0,Math.min(doc.length,30000)) : '');
         const manual=['en','zh'].includes(this.settings.manuscriptLanguages[view.file.path]);
-        this.languageStatus.setText((this.languageFor(view.file,analysis?.text || '')==='en'?'英文稿':'中文稿')+' · '+(manual?'手动':'自动'));
-        const decision=this.languageDecisionFor(view.file,analysis?.text || '');
+        this.languageStatus.setText((this.languageFor(view.file,languageText)==='en'?'英文稿':'中文稿')+' · '+(manual?'手动':'自动'));
+        const decision=this.languageDecisionFor(view.file,languageText);
         this.languageStatus.setAttribute('title',view.file.path+'\n识别依据：'+decision.source+(decision.uncertain?'；正文较短或中英混排，建议手动确认':'')+'\n点击选择稿件语言');
       }
     }
@@ -1428,6 +1402,7 @@ module.exports = class PaperCaptionPreview extends Plugin {
   enhanceNativeImages() {
     for (const host of this.nativeImages) if (!host.isConnected) this.nativeImages.delete(host);
     for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
+      if(this.isLiteFile(leaf.view.file))continue;
       const root=leaf.view.containerEl;
       for (const host of root.querySelectorAll('.image-embed')) {
         const nativeImage=host.querySelector('img');
@@ -1502,6 +1477,7 @@ module.exports = class PaperCaptionPreview extends Plugin {
     for (const [span] of this.tableOriginals) if (!span.isConnected) this.tableOriginals.delete(span);
     for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
       const view = leaf.view, root = view.containerEl;
+      if(this.isLiteFile(view.file)){this.restoreTableCitations(root);continue;}
       if(this.largePending.get(view.file?.path)?.dirty)continue;
       if (!this.settings.optimizeTables || !this.settings.citations) { this.restoreTableCitations(root); continue; }
       // Never modify active cell editors: their raw text belongs to CodeMirror.
@@ -1550,10 +1526,12 @@ module.exports = class PaperCaptionPreview extends Plugin {
       if(this.largePending.get(leaf.view.file?.path)?.dirty)continue;
       let changed=root.classList.contains('pcp-word-spacing')!==!!this.settings.wordSpacing;
       root.classList.toggle('pcp-word-spacing', this.settings.wordSpacing);
-      const fm={lang:this.languageFor(leaf.view.file,leaf.view.editor?.getValue()||'')==='en'?'en-US':'zh-CN'};
+      const doc=leaf.view.editor?.cm?.state?.doc;
+      const text=this.isLiteFile(leaf.view.file)&&doc ? doc.sliceString(0,Math.min(doc.length,30000)) : leaf.view.editor?.getValue()||'';
+      const fm={lang:this.languageFor(leaf.view.file,text)==='en'?'en-US':'zh-CN'};
       changed ||= root.classList.contains('pcp-english')!==(fm.lang==='en-US');
       root.classList.toggle('pcp-english',manuscriptLanguage(fm)==='en');
-      for (const [key,value] of Object.entries(manuscriptVariables(this.appearanceFor(leaf.view.file,leaf.view.editor?.getValue()||''),fm))) {
+      for (const [key,value] of Object.entries(manuscriptVariables(this.appearanceFor(leaf.view.file,text),fm))) {
         if(root.style.getPropertyValue(key)!==value){root.style.setProperty(key,value);changed=true;}
       }
       if(changed)leaf.view.editor?.cm?.requestMeasure?.();
@@ -1573,9 +1551,19 @@ module.exports = class PaperCaptionPreview extends Plugin {
       leaf.view.containerEl.classList.toggle('pcp-word-spacing', this.settings.wordSpacing);
       leaf.view.containerEl.classList.toggle('pcp-quiet-blanks', this.settings.quietBlankWarnings);
       const root = leaf.view.containerEl;
-      const fm={lang:this.languageFor(leaf.view.file,leaf.view.editor?.getValue()||'')==='en'?'en-US':'zh-CN'};
+      const doc=leaf.view.editor?.cm?.state?.doc;
+      const lite=this.performanceFor(doc || leaf.view.editor?.getValue() || '',leaf.view.file).lite;
+      const text=lite&&doc ? doc.sliceString(0,Math.min(doc.length,30000)) : leaf.view.editor?.getValue()||'';
+      const fm={lang:this.languageFor(leaf.view.file,text)==='en'?'en-US':'zh-CN'};
       root.classList.toggle('pcp-english',manuscriptLanguage(fm)==='en');
-      for (const [key,value] of Object.entries(manuscriptVariables(this.appearanceFor(leaf.view.file,leaf.view.editor?.getValue()||''),fm))) root.style.setProperty(key,value);
+      for (const [key,value] of Object.entries(manuscriptVariables(this.appearanceFor(leaf.view.file,text),fm))) root.style.setProperty(key,value);
+      if(lite){
+        this.tableObservers.get(root)?.disconnect();this.tableObservers.delete(root);
+        this.restoreTableCitations(root);
+        const cm=leaf.view.editor?.cm;
+        if(cm?.state)cm.dispatch({effects:refreshEffect.of(null)});
+        continue;
+      }
       if (!this.tableObservers.has(root)) {
         const observer = new MutationObserver(() => this.queueTables());
         observer.observe(root, {childList: true, subtree: true, characterData: true});

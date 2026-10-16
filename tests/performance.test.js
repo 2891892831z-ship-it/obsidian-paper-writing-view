@@ -6,6 +6,7 @@ const core = require('../src/core');
 const {performance} = require('node:perf_hooks');
 
 async function fixture(text, mode = 'auto') {
+  const events = {};
   const file = {path:'large.md'}, counts = {}, timers = new Map(); let serial = 0;
   const parser = {...core};
   for (const key of ['scanDocument','maskExamples','blankLineViolations','fakeScriptViolations'])
@@ -31,12 +32,11 @@ async function fixture(text, mode = 'auto') {
     style:{getPropertyValue:k=>styles.get(k)||'',setProperty:(k,v)=>styles.set(k,v)},querySelectorAll:()=>[]};
   const view={file,containerEl:root,editor:{cm,getValue:()=>cm.state.doc.toString()}};
   plugin.app={plugins:{plugins:{}},vault:{on(){}},metadataCache:{on(){},getFileCache:()=>({frontmatter:{lang:'en-US'}})},
-    workspace:{on(){},onLayoutReady(){},getLeavesOfType:()=>[{view}],getActiveViewOfType:()=>view}};
+    workspace:{on(name,fn){events[name]=fn;},onLayoutReady(){},getLeavesOfType:()=>[{view}],getActiveViewOfType:()=>view}};
   await plugin.onload();
   cm.state=cmState.EditorState.create({doc:text,extensions:[info,live,plugin.field]});
-  return {plugin,cm,view,counts,timers,runIdle(){
-    const pending=plugin.largePending.get(file.path);
-    assert(pending);const task=timers.get(pending.timer);timers.delete(pending.timer);task.fn();
+  return {plugin,cm,view,counts,timers,events,runTimers(){
+    const tasks=[...timers.values()];timers.clear();tasks.forEach(task=>task.fn());
   }};
 }
 function widgets(state,field){const rows=[];state.field(field).between(0,state.doc.length,(from,to,value)=>{
@@ -51,50 +51,38 @@ test('automatic mode honors size/image thresholds and explicit overrides',()=>{
   assert(!core.performanceDecision('normal',1000000,500).large);
 });
 
-test('100 keystrokes in a large manuscript do not rescan; idle refreshes once and status is never falsely clean',async t=>{
+
+test('automatic large manuscript does no full parsing on open, typing, selection, idle status or composition',async t=>{
   const text=Array.from({length:200},(_,i)=>('A scientific paragraph with CO₂ and helium migration. '.repeat(100)+
     `\n\n![Caption ${i}](img-${i}.png){#fig:f${i}}\n\n`)).join('');
-  const start=performance.now();
-  const f=await fixture(text);f.plugin.updateBlankStatus(f.view);
-  const initialMs=performance.now()-start,typingStart=performance.now();
-  const before={...f.counts};
-  for(let i=0;i<100;i++)f.cm.dispatch({changes:{from:20,insert:'a'}});
-  const typingMs=performance.now()-typingStart;
+  const start=performance.now(), f=await fixture(text);
   f.plugin.updateBlankStatus(f.view);
-  assert.equal(f.counts.scanDocument,before.scanDocument);
-  assert.equal(f.counts.maskExamples,before.maskExamples);
-  assert.equal(f.counts.blankLineViolations,before.blankLineViolations);
-  assert.equal(f.counts.fakeScriptViolations,before.fakeScriptViolations);
+  f.cm.composing=true;
+  for(let i=0;i<100;i++){
+    f.cm.dispatch({changes:{from:20,insert:'字'},selection:{anchor:21}});
+    f.events['editor-change'](f.view.editor,f.view);
+  }
+  f.cm.composing=false;f.runTimers();
+  assert.deepEqual(f.counts,{});
   assert.equal(f.plugin.scriptStatus.text,'上下标待检查');
   assert.equal(f.plugin.blankStatus.text,'空行待检查');
-  assert.equal(f.plugin.largePending.size,1);
-  const idleStart=performance.now();f.runIdle();const idleMs=performance.now()-idleStart;
-  assert.equal(f.counts.scanDocument,before.scanDocument+1);
-  assert.equal(f.counts.blankLineViolations,before.blankLineViolations+1);
-  assert.equal(f.counts.fakeScriptViolations,before.fakeScriptViolations+1);
-  assert.match(f.plugin.scriptStatus.text,/虚假上下标 20000 处/);
+  assert.equal(f.plugin.analysisCache.size,0);
   assert.equal(f.plugin.largePending.size,0);
-  assert.equal(widgets(f.cm.state,f.plugin.field).filter(r=>r.widget.figure).length,200);
-  t.diagnostic(`${text.length} characters, 200 figures: initial ${initialMs.toFixed(1)} ms; 100 mapped edits ${typingMs.toFixed(1)} ms; idle refresh ${idleMs.toFixed(1)} ms. Node benchmark excludes Obsidian UI/image decoding.`);
+  assert.equal(widgets(f.cm.state,f.plugin.field).length,0);
+  assert.equal(f.timers.size,0);
+  t.diagnostic(`${text.length} characters / 200 figures: open and 100 editor events ${(performance.now()-start).toFixed(1)} ms, zero parser calls. Excludes native Obsidian rendering.`);
 });
 
-test('mapped figure positions update reused DOM handlers and cursor reveals source without a scan',async()=>{
-  const text='intro\n\n![A](a.png){#fig:a}\n\nSee @fig:a.';
-  const f=await fixture(text,'large');
-  const first=widgets(f.cm.state,f.plugin.field).find(r=>r.widget.figure);
-  const peer={figure:first.widget.figure};first.widget.domPeer=peer;
-  const scans=f.counts.scanDocument;
-  f.cm.dispatch({changes:{from:0,insert:'prefix '}});
-  let image=widgets(f.cm.state,f.plugin.field).find(r=>r.widget.figure);
-  assert.equal(image.from,first.from+7);
-  assert.equal(image.widget.figure.from,image.from);
-  assert.equal(peer.figure.from,image.from);
-  f.cm.dispatch({selection:{anchor:image.from+3}});
-  assert(!widgets(f.cm.state,f.plugin.field).some(r=>r.widget.figure));
-  assert.equal(f.counts.scanDocument,scans);
-  f.cm.dispatch({selection:{anchor:f.cm.state.doc.length}});f.runIdle();
-  image=widgets(f.cm.state,f.plugin.field).find(r=>r.widget.figure);
-  assert.equal(image.widget.figure.from,first.from+7);
+test('legacy manually selected large mode and explicit lite mode both bypass rendering and CSL',async()=>{
+  for(const mode of ['large','lite']){
+    const f=await fixture('intro CO₂\n\n![A](a.png){#fig:a}',mode);
+    let requests=0;
+    f.plugin.app.plugins.plugins['obsidian-pandoc-reference-list']={bibManager:{getReferenceList(){requests++;}}};
+    f.plugin.citations.ensure(f.view.file,'[@key]');
+    f.cm.dispatch({changes:{from:0,insert:'edit '}});f.plugin.updateBlankStatus(f.view);
+    assert.deepEqual(f.counts,{});assert.equal(requests,0);
+    assert.equal(widgets(f.cm.state,f.plugin.field).length,0);
+  }
 });
 
 test('normal mode refreshes immediately; repeated selection reuses the immutable document analysis',async()=>{
@@ -104,31 +92,26 @@ test('normal mode refreshes immediately; repeated selection reuses the immutable
   assert.equal(f.counts.scanDocument,first);
   f.cm.dispatch({changes:{from:0,insert:'new '}});
   assert.equal(f.counts.scanDocument,first+1);
-  assert.equal(f.plugin.largePending.size,0);
 });
 
-test('manual full check flushes pending work, bounded caches release old snapshots and unload cancels timers',async()=>{
-  const f=await fixture('intro CO₂\n\n![A](a.png){#fig:a}','large');
-  for(let i=0;i<10;i++){
-    f.cm.dispatch({changes:{from:1,insert:'a'}});f.plugin.checkWholeDocument(f.view);
-  }
-  assert.equal(f.plugin.largePending.size,0);
-  assert(f.plugin.analysisCache.size<=4);
-  f.cm.dispatch({changes:{from:1,insert:'a'}});
-  const timer=f.plugin.largePending.get('large.md').timer;
-  f.plugin.app.workspace.getLeavesOfType=()=>[];
-  f.plugin.onunload();
-  assert(!f.timers.has(timer));assert.equal(f.plugin.analysisCache.size,0);
+test('manual lightweight checks only scan blanks/scripts and never build figure decorations',async()=>{
+  const f=await fixture('intro CO₂\n![A](a.png){#fig:a}','lite');
+  const before=f.cm.state.doc.toString();
+  f.plugin.checkWholeDocument(f.view);
+  assert.equal(f.counts.scanDocument,undefined);
+  assert.equal(f.counts.blankLineViolations,1);assert.equal(f.counts.fakeScriptViolations,1);
+  assert.match(f.plugin.scriptStatus.text,/1 处/);assert.match(f.plugin.blankStatus.text,/1 处/);
+  assert.equal(f.cm.state.doc.toString(),before);
+  f.cm.dispatch({changes:{from:1,insert:'a'}});f.events['editor-change'](f.view.editor,f.view);f.runTimers();
+  assert.equal(f.counts.blankLineViolations,1);assert.equal(f.counts.fakeScriptViolations,1);
+  assert.equal(f.plugin.scriptStatus.text,'上下标待检查');
 });
 
-test('idle refresh waits for IME composition; explicit mode switch cancels pending refresh',async()=>{
-  const f=await fixture('intro CO₂','large');
-  f.cm.dispatch({changes:{from:1,insert:'a'}});const scans=f.counts.scanDocument;
-  f.cm.composing=true;f.runIdle();assert.equal(f.counts.scanDocument,scans);
-  assert.equal(f.plugin.largePending.size,1);
+test('lightweight checks defer during IME and unload clears all pending status work',async()=>{
+  const f=await fixture('intro CO₂','lite');
+  f.cm.composing=true;f.plugin.checkWholeDocument(f.view);assert.deepEqual(f.counts,{});
   f.cm.composing=false;
-  // Avoid installing browser observers in this isolated test of the settings transition.
-  f.plugin.refresh=()=>{};
-  await f.plugin.setPerformanceMode('normal');
-  assert.equal(f.plugin.largePending.size,0);assert.equal(f.plugin.settings.performanceMode,'normal');
+  f.events['editor-change'](f.view.editor,f.view);const timer=f.plugin.blankStatusTimer;
+  f.plugin.app.workspace.getLeavesOfType=()=>[];f.plugin.onunload();
+  assert(!f.timers.has(timer));assert.equal(f.plugin.analysisCache.size,0);
 });

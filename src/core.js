@@ -329,9 +329,10 @@ function fakeScriptViolations(text) {
 }
 
 function performanceDecision(mode, length, imageCount = 0) {
-  const large = mode === 'large' || (mode !== 'normal' && (length >= 80000 || imageCount >= 60));
-  return {large, mode:['normal','large'].includes(mode)?mode:'auto', length, imageCount,
-    reason:mode === 'large' ? '手动选择' : mode === 'normal' ? '手动选择' :
+  const large = mode === 'lite' || mode === 'large' || (mode !== 'normal' && (length >= 80000 || imageCount >= 60));
+  return {large, lite:large,
+    mode:['normal','large','lite'].includes(mode)?mode:'auto', length, imageCount,
+    reason:mode === 'lite' || mode === 'large' ? '手动选择' : mode === 'normal' ? '手动选择' :
       length >= 80000 ? '正文达到 8 万字符' : imageCount >= 60 ? '图片标记达到 60 处' : '未达到大稿件阈值'};
 }
 
