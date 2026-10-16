@@ -343,7 +343,9 @@
 .pcp-batch-translation-modal .pcp-caption-review-status { margin: 4px 0 6px; font-size: var(--font-ui-small); color: var(--text-muted); }
 .modal.pcp-batch-translation-modal.pcp-translation-modal textarea.pcp-translation-output {
   display: block; box-sizing: border-box; width: 100%;
-  height: 64px !important; min-height: 64px !important; max-height: 160px;
+  height: auto !important; min-height: 42px !important; max-height: 240px;
+  field-sizing: content;
+  font-size: 18px !important;
   margin: 0; padding: 6px 8px; line-height: 1.4; overflow-y: auto; resize: vertical;
 }
 @media (max-width: 600px) { .pcp-batch-api { grid-template-columns: 1fr; } }

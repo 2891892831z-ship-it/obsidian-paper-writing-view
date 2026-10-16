@@ -1,6 +1,6 @@
 ---
 created: 2026-10-13 16:33
-date modified: 2026.10.16 18:30:19
+date modified: 2026.10.16 18:39:44
 tags: [Obsidian, 插件开发, 图注]
 ---
 
@@ -8,7 +8,7 @@ tags: [Obsidian, 插件开发, 图注]
 
 让 Obsidian 的论文写作界面接近 Word 的成稿排版：中文宋体、西文 Times New Roman、段落缩进与两端对齐、紧凑空行、图表公式预览及引用补全。字体、字号、颜色、行距、图片边框和表格外观都能在插件设置中调整。
 
-插件 ID 保持 `paper-caption-preview`，当前版本 **0.16.1**。已有本机版本可直接升级，保留设置。这是显示与写作辅助插件；Word 导出由独立项目 [MD Export Word](https://github.com/2891892831z-ship-it/obsidian-md-export-word) 负责，两者可分别安装。
+插件 ID 保持 `paper-caption-preview`，当前版本 **0.16.2**。已有本机版本可直接升级，保留设置。这是显示与写作辅助插件；Word 导出由独立项目 [MD Export Word](https://github.com/2891892831z-ship-it/obsidian-md-export-word) 负责，两者可分别安装。
 
 ## 通过 BRAT 安装
 
