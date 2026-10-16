@@ -351,6 +351,36 @@ test('image and table caption lines are excluded from indentation', async () => 
   assert.deepEqual(indentOffsets(ranges),[22]);
 });
 
+test('English caption divs hide the fences and resolve suppressed references', async () => {
+  const text='![中文图题](a.png){#fig:a}\n\n::: {custom-style="Figure Caption EN"}\nFig. [-@fig:a] Typical organic pores (oil-wet), inorganic pores (water-wet) in shale\n:::';
+  const {ranges,view}=await fixture(text);
+  const div=ranges.find(r=>r.widget?.figure?.captionDiv);
+  assert(div,'caption div is replaced by one widget');
+  assert.equal(div.from,text.indexOf(':::'));
+  assert.equal(div.to,text.length);
+  const dom=div.widget.toDOM(view);
+  const all=[];const collect=e=>{if(e.text)all.push(e.text);if(e.textContent)all.push(e.textContent);for(const c of e.children||[])collect(c);};
+  collect(dom);
+  const joined=all.join('');
+  assert(joined.includes('Fig. 1'),'suppressed reference resolves to the bare number');
+  assert(!joined.includes('[-@'));
+  assert(!joined.includes(':::'));
+  assert.equal(dom.dataset.customStyle,'Figure Caption EN');
+  const editing=await fixture(text,{selection:{ranges:[{from:text.indexOf('Fig.'),to:text.indexOf('Fig.')}]}});
+  assert.equal(editing.ranges.filter(r=>r.widget?.figure?.captionDiv).length,0,'cursor inside reveals the source');
+});
+
+test('prose suppressed references render the bare number with the prefix suppressed', async () => {
+  const text='![图](a.png){#fig:a}\n\n见 [-@fig:a] 与 @fig:a 所示。';
+  const {ranges,view}=await fixture(text);
+  const suppressed=ranges.find(r=>r.widget?.reference?.numberOnly);
+  assert(suppressed);
+  assert.equal(text.slice(suppressed.from,suppressed.to),'[-@fig:a]');
+  assert.equal(suppressed.widget.toDOM(view).textContent,'1');
+  const plain=ranges.filter(r=>r.widget?.reference && !r.widget.reference.numberOnly);
+  assert.equal(plain[0].widget.toDOM(view).textContent,'图 1');
+});
+
 test('missing blank lines before images and headings get warning decorations', async () => {
   const text='正文段落。\n![图](a.png){#fig:a}\n## 标题\n\n正常段落。\n\n![好图](b.png){#fig:b}\n\n```\ncode\n```\n\n结尾。';
   // Line starts: 0 prose, 6 image (19 chars, warn), 26 heading (warn), then clean.

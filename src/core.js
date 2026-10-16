@@ -123,16 +123,59 @@ function scanDocument(text) {
     const eol = masked.indexOf('\n', eqRegex.lastIndex);
     equations.push({from: lineStart, to: eol < 0 ? masked.length : eol, id: match[1], number: eqNumbers.get(match[1])});
   }
+  // Pandoc fenced divs whose custom-style is a caption style (thesis Word
+  // templates use "Figure Caption EN" / "Table Caption EN"): fences and inner
+  // caption render as one caption block. Bare colon fences close the innermost
+  // open div, so :::: wrappers around ::: divs nest correctly.
+  const captionDivs = [];
+  {
+    const isCaptionStyle = style => style != null && /caption|题注|图题|表题/i.test(style);
+    const customStyle = attrs => {
+      const found = /custom-style\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s}]+))/i.exec(attrs);
+      return found ? String(found[1] ?? found[2] ?? found[3] ?? '') : null;
+    };
+    const stack = [];
+    let offset = 0;
+    for (const line of masked.split('\n')) {
+      const fence = /^ {0,3}(:{3,})[ \t]*(.*)$/.exec(line);
+      if (fence && !fence[2].trim() && stack.length && fence[1].length >= stack.at(-1).marks) {
+        const open = stack.pop();
+        if (isCaptionStyle(open.style)) captionDivs.push({from: open.from, to: offset + line.length,
+          contentFrom: open.contentFrom, contentTo: offset, style: open.style});
+      } else if (fence && fence[2].trim())
+        stack.push({from: offset, marks: fence[1].length, style: customStyle(fence[2]), contentFrom: offset + line.length + 1});
+      else if (fence && !stack.length)
+        stack.push({from: offset, marks: fence[1].length, style: null, contentFrom: offset + line.length + 1});
+      offset += line.length + 1;
+    }
+  }
+  // The caption block replaces its whole fenced range; drop inner figures,
+  // tables and equations to avoid overlapping decorations. Label numbers stay
+  // assigned because the number maps were built by the scans above.
+  const inCaptionDiv = at => captionDivs.some(div => at >= div.from && at < div.to);
+  for (const list of [figures, tables, equations])
+    for (let i = list.length - 1; i >= 0; i--) if (inCaptionDiv(list[i].from)) list.splice(i, 1);
   const references = [];
+  const owns = at => escaped(masked, at) || inCaptionDiv(at) ||
+    figures.some(f => at >= f.from && at < f.to) || tables.some(t => at >= t.from && at < t.to) ||
+    equations.some(e => at >= e.from && at < e.to);
+  const numberMap = type => type === 'fig' ? numbers : type === 'tbl' ? tableNumbers : eqNumbers;
+  // [-@fig:id], pandoc-crossref's suppressed form, renders the bare number.
+  const suppressedRegex = /\[-@(fig|tbl|eq):([\w:-]+)\]/g;
+  while ((match = suppressedRegex.exec(masked))) {
+    if (owns(match.index)) continue;
+    references.push({from: match.index, to: suppressedRegex.lastIndex, type: match[1], id: match[2],
+      number: numberMap(match[1]).get(match[2]), numberOnly: true});
+  }
   const refRegex = /@(fig|tbl|eq):([\w:-]+)/g;
   while ((match = refRegex.exec(masked))) {
-    if (escaped(masked, match.index) || figures.some(f => match.index >= f.from && match.index < f.to)) continue;
-    if (tables.some(t => match.index >= t.from && match.index < t.to)) continue;
-    if (equations.some(e => match.index >= e.from && match.index < e.to)) continue;
-    references.push({from: match.index, to: refRegex.lastIndex, type: match[1], id: match[2],
-      number: (match[1] === 'fig' ? numbers : match[1] === 'tbl' ? tableNumbers : eqNumbers).get(match[2])});
+    if (owns(match.index) || references.some(r => match.index >= r.from && match.index < r.to)) continue;
+    const suppressed = match.index > 0 && masked[match.index - 1] === '-' && !escaped(masked, match.index - 1);
+    references.push({from: suppressed ? match.index - 1 : match.index, to: refRegex.lastIndex, type: match[1], id: match[2],
+      number: numberMap(match[1]).get(match[2]), numberOnly: suppressed});
   }
-  return {figures, tables, equations, numbers, tableNumbers, eqNumbers, references, duplicates};
+  references.sort((a, b) => a.from - b.from);
+  return {figures, tables, equations, numbers, tableNumbers, eqNumbers, references, duplicates, captionDivs};
 }
 
 function citationMap(cache) {

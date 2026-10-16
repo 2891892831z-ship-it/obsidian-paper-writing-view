@@ -52,6 +52,11 @@
 
 }
 .pcp-table-caption .pcp-caption { margin-top: 0; }
+/* Pandoc fenced caption divs (::: {custom-style="Figure Caption EN"}) replace
+   whole source lines with one block caption; no native widget lives on those
+   lines, so only layout resets are needed here. */
+.pcp-caption-div { display: block; width: 100%; }
+.pcp-caption-div .pcp-caption { margin-top: 0; }
 /* Block replacements leave an empty boundary line as well as the source blank line.
    Compact only empty lines next to our figures/captions; keep active editing lines full height. */
 .pcp-preview-scope .pcp-figure + .cm-line:has(> br:only-child):not(.cm-active),
