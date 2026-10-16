@@ -57,6 +57,14 @@
    lines, so only layout resets are needed here. */
 .pcp-caption-div { display: block; width: 100%; }
 .pcp-caption-div .pcp-caption { margin-top: 0; }
+/* Bilingual titles form one caption: source separator lines need no extra height.
+   Keep the caret line usable, and leave image-to-caption spacing unchanged. */
+.pcp-preview-scope.pcp-preview-scope.pcp-preview-scope .cm-content > .pcp-figure + .cm-line:has(> br:only-child):has(+ .pcp-caption-div):not(.cm-active),
+.pcp-preview-scope.pcp-preview-scope.pcp-preview-scope .cm-content > .pcp-figure + .cm-line:has(> br:only-child):has(+ .cm-line + .pcp-caption-div):not(.cm-active),
+.pcp-preview-scope.pcp-preview-scope.pcp-preview-scope .cm-content > .pcp-figure + .cm-line:has(> br:only-child) + .cm-line:has(> br:only-child):has(+ .pcp-caption-div):not(.cm-active) {
+  height: 0 !important; min-height: 0 !important; line-height: 0 !important;
+  font-size: 0 !important; padding: 0 !important; margin: 0 !important;
+}
 /* Block replacements leave an empty boundary line as well as the source blank line.
    Compact only empty lines next to our figures/captions; keep active editing lines full height. */
 .pcp-preview-scope .pcp-figure + .cm-line:has(> br:only-child):not(.cm-active),
@@ -79,6 +87,29 @@
 .pcp-optimize-tables .markdown-preview-view .table-wrapper { max-width: 100%; overflow-x: auto; }
 .pcp-optimize-tables .cm-content table,
 .pcp-optimize-tables .markdown-preview-view table { table-layout: auto; width: fit-content; max-width: 100%; margin-inline: auto; }
+/* Center the native block as well as its table, including lightweight mode.
+   Theme rules may shrink the wrapper or float the table; wide tables retain a
+   full-width scroll container so their left edge remains accessible. */
+.pcp-preview-scope.pcp-optimize-tables :is(.cm-table-widget, .markdown-preview-view .el-table) {
+  display: block !important;
+  width: 100% !important;
+  max-width: 100%;
+  text-indent: 0 !important;
+}
+.pcp-preview-scope.pcp-optimize-tables :is(.cm-table-widget, .markdown-preview-view .el-table) > .table-wrapper {
+  display: block !important;
+  width: 100% !important;
+  max-width: 100%;
+  overflow-x: auto;
+  text-indent: 0 !important;
+}
+.pcp-preview-scope.pcp-optimize-tables :is(.cm-table-widget table, .markdown-preview-view .el-table table, .markdown-preview-view .el-table > table) {
+  display: table !important;
+  float: none !important;
+  width: auto !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+}
 .pcp-optimize-tables .cm-content :is(td, th),
 .pcp-optimize-tables .markdown-preview-view :is(td, th) { white-space: normal !important; overflow-wrap: anywhere; word-break: normal; vertical-align: middle !important; text-align: center !important; min-width: 4em; max-width: 28em; }
 .pcp-optimize-tables .table-cell-wrapper { white-space: normal !important; overflow-wrap: anywhere; text-align: center !important; }
@@ -293,3 +324,26 @@
   color: var(--pcp-reference-color);
   font-family: inherit;
 }
+
+.pcp-translation-modal { width: min(850px, 92vw); }
+.pcp-translation-modal pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; }
+.pcp-translation-modal select { max-width: min(460px, 52vw); }
+.pcp-translation-output { width: 100%; min-height: 120px; resize: vertical; font-family: 'Times New Roman', serif; }
+.pcp-translation-modal .pcp-review-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.pcp-batch-api { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.pcp-batch-api > label { display: flex; flex-direction: column; gap: 4px; }
+.pcp-batch-api :is(input, select) { width: 100%; max-width: 100%; }
+.pcp-effort-control { padding: 10px 12px; border-radius: 12px; background: var(--background-secondary); }
+.pcp-effort-control input[type=range] { margin: 14px 0; accent-color: var(--interactive-accent); }
+.pcp-effort-ends { color: var(--text-muted); font-size: var(--font-ui-small); }
+.pcp-batch-translation-modal .pcp-review-list { max-height: 40vh; margin-top: 10px; }
+.pcp-batch-translation-modal .pcp-review-row { padding: 10px 0; }
+.pcp-batch-translation-modal .pcp-caption-review-heading { display: flex; align-items: baseline; gap: 6px; line-height: 1.5; overflow-wrap: anywhere; }
+.pcp-batch-translation-modal .pcp-caption-review-heading input { flex-shrink: 0; }
+.pcp-batch-translation-modal .pcp-caption-review-status { margin: 4px 0 6px; font-size: var(--font-ui-small); color: var(--text-muted); }
+.modal.pcp-batch-translation-modal.pcp-translation-modal textarea.pcp-translation-output {
+  display: block; box-sizing: border-box; width: 100%;
+  height: 64px !important; min-height: 64px !important; max-height: 160px;
+  margin: 0; padding: 6px 8px; line-height: 1.4; overflow-y: auto; resize: vertical;
+}
+@media (max-width: 600px) { .pcp-batch-api { grid-template-columns: 1fr; } }

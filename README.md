@@ -1,6 +1,6 @@
 ---
 created: 2026-10-13 16:33
-date modified: 2026.10.16 16:46:33
+date modified: 2026.10.16 18:30:19
 tags: [Obsidian, 插件开发, 图注]
 ---
 
@@ -8,7 +8,7 @@ tags: [Obsidian, 插件开发, 图注]
 
 让 Obsidian 的论文写作界面接近 Word 的成稿排版：中文宋体、西文 Times New Roman、段落缩进与两端对齐、紧凑空行、图表公式预览及引用补全。字体、字号、颜色、行距、图片边框和表格外观都能在插件设置中调整。
 
-插件 ID 保持 `paper-caption-preview`，当前版本 **0.12.0**。已有本机版本可直接升级，保留设置。这是显示与写作辅助插件；Word 导出由独立项目 [MD Export Word](https://github.com/2891892831z-ship-it/obsidian-md-export-word) 负责，两者可分别安装。
+插件 ID 保持 `paper-caption-preview`，当前版本 **0.16.1**。已有本机版本可直接升级，保留设置。这是显示与写作辅助插件；Word 导出由独立项目 [MD Export Word](https://github.com/2891892831z-ship-it/obsidian-md-export-word) 负责，两者可分别安装。
 
 ## 通过 BRAT 安装
 
@@ -39,7 +39,7 @@ tags: [Obsidian, 插件开发, 图注]
 
 ## Bilingual captions
 
-English captions must already be written in the Markdown; the plugin does not translate them. In ordinary Live Preview, write the English caption below the image (or table) using a Pandoc custom-style block:
+Caption rendering displays English captions already written in Markdown. Optional AI translation is a separate, explicit command (see below). In ordinary Live Preview, write the English caption below the image (or table) using a Pandoc custom-style block:
 
 ```markdown
 ![Chinese caption](image.png){#fig:example}
@@ -51,7 +51,47 @@ Fig. [-@fig:example] English caption
 
 The English caption appears below the Chinese caption, with its number synchronized to the same label. Use `Table Caption EN` and `Table [-@tbl:example]` for tables. Click inside a caption to edit its source. English caption styles use the configured Latin font (Times New Roman by default). Missing labels retain their original reference text.
 
-This rendering is available in ordinary Live Preview. Lightweight writing skips these replacements; Reading View does not provide the full caption replacement. This release does not change the separate Word export plugin or translate manuscript content.
+This rendering is available in ordinary Live Preview. Lightweight writing skips these replacements; Reading View does not provide the full caption replacement. The separate Word export plugin is unchanged.
+
+## AI 英文题注翻译（本地试用）
+
+### 无需 API：与现有 AI 对话协作
+
+在中文稿运行“批量生成英文图表题”，勾选目标后点击“复制全文与翻译要求（无需 API）”。把剪贴板内容粘贴到正在使用的 AI 对话，AI 会收到全文文字、题名清单及结构化返回要求；图片文件不包含在内。此流程不要求填写 API 地址或密钥，不自动发送消息或打开外部应用。
+
+取得 AI 返回的完整 JSON 后点击“导入 AI 译文”，粘贴并导入审阅列表。也可以先关闭窗口，取得译文后再打开；原中文题名必须仍与任务一致。每条译文可编辑、勾选，检查后点击“确认写入勾选项”才修改稿件，可一次撤销。若部分题名未返回，可以先导入已有条目，只有导入条目会被勾选。
+
+返回结构为 `{"translations":[{"key":"fig:example","source":"中文原题","text":"English caption"}]}`，支持直接 JSON 或 JSON 代码块。标签和原题必须完全一致；允许数字因英文语法调序，但不允许改值、增减，井号及带上下标的表达式按整体核对，引用和公式保留顺序。导入和确认写入使用相同检查；数字核对不能判断每个数值在语义上是否仍对应正确对象，仍需人工审阅。外部 AI 对话仍受其上下文容量与使用额度约束；不要把原文截断后仍当作已阅读全文。
+
+### 可选：直接调用 API
+
+1. 在插件设置的“AI 英文题注翻译（按需）”中填写 Chat Completions 兼容 API 基础地址和模型名称。支持 HTTPS 在线服务，或 `http://localhost:端口/v1` 形式的本地模型。
+2. 填写 API 密钥；本地无鉴权服务可留空。配置停止输入约 600 毫秒后自动保存，关闭窗口也会保存未完成修改。密钥写入 Obsidian 密钥存储，不写入笔记或 `data.json`；下次自动读取。旧版 Obsidian 不支持该存储时会提示保存失败。
+3. 执行命令“翻译英文图题／表题”，或在“图表与公式导航”中选择“翻译英文题注”。
+4. 选择题注与语境范围，展开“查看实际发送的请求正文”。默认发送全文，不设插件层字符上限；仍受服务商模型上下文与请求大小上限约束。超限时可手动选择正文标题、摘要、题注前后各约 3500 字符及最多六条已有英文题注。全文模式每次发送所选稿件的可见文字，不建立或缓存 AI 全文摘要。
+5. 点击“发送并生成译文”，检查并编辑译文，再点击“确认写入英文题注”。若已有紧邻、标签匹配的英文题注块，将替换该块；否则新增。写入和时间字段更新可一次撤销。
+
+代码、注释和 frontmatter 从语境中屏蔽；图片路径、引用和其他正文文字仍可能包含在发送内容中，不会读取图片文件或链接笔记。所选服务可能收取 API 费用。普通写作、打开笔记、移动光标时不发起翻译请求，也不在后台分析全文。
+
+支持带唯一 `{#fig:id}` 的独立或同一行并排 Markdown 图片，以及带 `{#tbl:id}`、以 `|` 起始各行的标准管道表格。Wiki 图片暂不自动写入；重复标签、未闭合英文题注、稿件变化或数字/引用/上下标未保留时会阻止写入。保留检查不能替代对术语和原意的人工核对。译文写入后，轻量模式仍保留源码显示。
+
+并排图片按各自标签独立翻译、编辑和勾选，图片源码行保持原样。英文题注以标准 `Figure Caption EN` 块放在整组图片后面；普通实时预览按标签将其放回对应图片下方，已有英文题注按标签更新，不重复新增。光标进入图组或英文题注时展开源码。本次未修改 Word 导出插件；题注使用既有 Pandoc 写法，Word 中并排图组的最终布局仍需单独导出验收。
+
+### 中文稿批量生成英文图表题
+
+在中文稿的“图表与公式导航”中点击“批量生成英文图表题”，或运行同名命令。英文稿隐藏翻译命令和导航入口；语言按笔记元数据、手动选择及正文识别结果判断。若识别有误，可通过状态栏指定稿件语言。
+
+窗口列出全部支持的图题与表题，默认只勾选缺少英文题注的项目。已有英文题注默认保留，也可以勾选后修改或重新生成。列表每页 30 条，翻页保留草稿与勾选。
+
+窗口直接显示可编辑的地址、模型、密钥和推理模式，修改后自动保存，不需要另点保存按钮。修改 API 地址时清空当前密钥输入，避免把旧服务的密钥发送给新地址；清空密钥会移除已存密钥。先点击“预览发送内容”，核对后点击“生成所选英文图表题”。整篇无总条数限制，内部队列每次请求处理一组题注，自动连续完成，无须手动分组。全文语境会随每次请求重复发送，预览中显示请求数量。关闭窗口后不再启动后续批次，已发送请求仍可能产生费用。
+
+填写地址和密钥后，可点击“获取模型列表”，从服务商的 `/models` 接口读取模型 ID 后下拉选择。这不会下载模型，也不发送稿件；列表不代表账号实际调用权限，不支持列表的服务仍可手动填写模型。智谱根域名 `https://open.bigmodel.cn` 会补全为 `https://open.bigmodel.cn/api/paas/v4`，Coding 等专用接口须按服务商说明填写完整地址。
+
+Effort 滑块默认不发送额外参数。智谱可选关闭思考、默认、开启深度思考，使用 `thinking.type`；其他兼容接口显示默认、Minimal、Low、Medium、High、XHigh、Max，按原值发送 `reasoning_effort`。这些档位不是模型能力排名，不代表服务商支持所有参数，特别是 XHigh 和 Max；接口拒绝时请选默认。可通过“保存为默认配置”记住选择。智谱地址依据：[官方 API 简介](https://docs.bigmodel.cn/cn/api/introduction)。
+
+生成后可逐条编辑、取消勾选，再点击“确认写入勾选项”。所有勾选项须有有效译文；API 失败时保留已完成草稿，可取消勾选未完成项后写入。统一写入只更新时间字段一次，支持一次撤销；稿件或语言已变化则阻止写入。
+
+表格整体居中与单元格文字居中均由“优化表格”控制。居中规则覆盖原生实时预览与阅读模式的表格容器，轻量模式也保留；超宽表格通过横向滚动显示，避免居中导致左侧内容不可访问。
 
 ## 大稿件模式
 

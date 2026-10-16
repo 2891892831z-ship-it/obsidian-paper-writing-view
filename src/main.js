@@ -3,7 +3,9 @@ const {Plugin, PluginSettingTab, Setting, Notice, Modal, MarkdownView, EditorSug
   editorInfoField, editorLivePreviewField, sanitizeHTMLToDom, setIcon, renderMath, finishRenderMath, Platform, requestUrl} = require('obsidian');
 const {StateField, StateEffect, EditorState} = require('@codemirror/state');
 const {Decoration, EditorView, WidgetType} = require('@codemirror/view');
-const {scanDocument, imageInventory, citationMap, maskExamples, blankLineViolations, referenceItems, documentIssues, blankLineEdits, fakeScriptViolations, fakeScriptEdits, performanceDecision} = require('./core');
+const {scanDocument, imageInventory, citationMap, maskExamples, blankLineViolations, referenceItems, documentIssues, blankLineEdits, fakeScriptViolations, fakeScriptEdits, performanceDecision,
+  captionTargets, captionTranslationPlan, protectCaption, captionTranslationRequest, validateCaptionTranslation, captionTranslationEdits,
+  captionBatchRequest, parseCaptionBatch, captionBatchEdits, translationBase, translationFailure,captionHandoff,importCaptionHandoff} = require('./core');
 
 const refreshEffect = StateEffect.define();
 const DEFAULTS = {prefix: '图', align: 'center', bold: false, showUnlabelled: true, citations: true, centerImages: true, optimizeTables: true, indentParagraphs: true, compactBlankLines: true, blankLineWarnings: true, wordSpacing: true,
@@ -11,7 +13,8 @@ const DEFAULTS = {prefix: '图', align: 'center', bold: false, showUnlabelled: t
   chineseFont: 'SimSun', latinFont: 'Times New Roman', punctuationSong: true, bodySize: 0, bodyLineHeight: 1.5,
   bodyThemeColor: true, bodyColor: '#222222', referenceColor: '#3498db', captionThemeColor: true, captionColorCustom: '#222222',
   paragraphGap: 10, indentSize: 2, captionScale: 0.875, captionLineHeight: 1.65, tableSize: 12, tableLineHeight: 1,
-  quietBlankWarnings: true, fakeScriptWarnings: true, performanceMode: 'auto', appearanceProfiles: {}, manuscriptLanguages: {}, languageAppearance: {}};
+  quietBlankWarnings: true, fakeScriptWarnings: true, performanceMode: 'auto', appearanceProfiles: {}, manuscriptLanguages: {}, languageAppearance: {},
+  translationEndpoint: 'https://api.openai.com/v1', translationModel: '', translationReasoning:'default'};
 
 const APPEARANCE_KEYS = ['chineseFont','latinFont','punctuationSong','bodySize','bodyLineHeight','bodyThemeColor','bodyColor',
   'referenceColor','captionThemeColor','captionColorCustom','paragraphGap','indentSize','captionScale','captionLineHeight','tableSize','tableLineHeight',
@@ -349,15 +352,21 @@ class FigureWidget extends WidgetType {
 }
 
 class FigureGroupWidget extends WidgetType {
-  constructor(items) { super(); this.items = items; }
+  constructor(items, captions = []) { super(); this.items = items; this.captions = captions; }
   eq(other) { return other instanceof FigureGroupWidget && this.items.length === other.items.length &&
+    this.captions.length===other.captions.length && this.captions.every((c,i)=>c ? c.eq(other.captions[i]) : !other.captions[i]) &&
     this.items.every((item, i) => item.eq(other.items[i])); }
   toDOM(view) {
     const dom = view.dom.ownerDocument.createElement('div'); dom.className = 'pcp-figure-group';
-    for (const item of this.items) dom.append(item.toDOM(view));
+    for (const [i,item] of this.items.entries()) {
+      const child=item.toDOM(view);
+      if(this.captions[i]) child.append(this.captions[i].toDOM(view));
+      dom.append(child);
+    }
     return dom;
   }
   updateDOM(dom) {
+    if(this.captions.some(Boolean)) return false;
     if (dom.children.length !== this.items.length || this.items.some((item, i) => dom.children[i]._pcpWidget?.renderKey !== item.renderKey)) return false;
     return this.items.every((item, i) => item.updateDOM(dom.children[i]));
   }
@@ -472,12 +481,30 @@ function buildDecorations(plugin, state) {
     if (!figureGroups.has(key)) figureGroups.set(key, []);
     figureGroups.get(key).push(figure);
   }
+  const groupedCaptionDivs=new Set();
   for (const group of figureGroups.values()) {
     const visible = group.filter(f => f.id || plugin.settings.showUnlabelled);
     if (!visible.length || visible.length !== group.length) continue;
-    const from = group[0].groupFrom, to = group[0].groupTo;
+    const from = group[0].groupFrom;
+    let to = group[0].groupTo;
+    let plans=[];
+    if(group.length>1 && !plugin.legacy()) {
+      try {
+        const prepared={parsed,targets:captionTargets(text,parsed)};
+        plans=group.map(figure=>captionTranslationPlan(text,{...figure,type:'fig'},'association',prepared));
+        to=plans[0].end;
+      } catch { plans=[]; }
+    }
     const lineFrom = state.doc.lineAt(from).from, lineTo = state.doc.lineAt(to).to;
     if (touches(lineFrom, lineTo)) continue;
+    const captions=plans.map(plan=>{
+      const div=plan.existing;
+      if(!div)return null;
+      groupedCaptionDivs.add(div.from);
+      return new FigureWidget(plugin,{from:div.from,to:div.to,caption:div.content,
+        src:null,id:null,number:null,rescue:false,captionDiv:div.style,
+        tableNumbers:parsed.tableNumbers,eqNumbers:parsed.eqNumbers},file,text,prefix,parsed.numbers);
+    });
     const items = visible.map(figure => {
     // Use one image renderer and toolbar for every standalone Markdown figure.
     const rescue = true;
@@ -485,7 +512,7 @@ function buildDecorations(plugin, state) {
     const widget = new FigureWidget(plugin, {...figure, rescue, blankWarning, tableNumbers: parsed.tableNumbers, eqNumbers: parsed.eqNumbers}, file, text, prefix, parsed.numbers);
     return widget;
     });
-    const widget = items.length === 1 ? items[0] : new FigureGroupWidget(items);
+    const widget = items.length === 1 ? items[0] : new FigureGroupWidget(items,captions);
     widgets.push(Decoration.replace({widget, block: true, inclusive: true}).range(from, to));
   }
   if (!plugin.legacy()) for (const table of parsed.tables) {
@@ -499,6 +526,7 @@ function buildDecorations(plugin, state) {
   // fences and inner caption as one caption block; the suppressed reference
   // form resolves to a bare number ("Fig. [-@fig:a]" shows "Fig. 1").
   if (!plugin.legacy()) for (const div of parsed.captionDivs) {
+    if (groupedCaptionDivs.has(div.from)) continue;
     if (touches(div.from, div.to)) continue;
     widgets.push(Decoration.replace({widget: new FigureWidget(plugin,
       {from: div.from, to: div.to, caption: text.slice(div.contentFrom, div.contentTo).trim(),
@@ -553,6 +581,19 @@ class CaptionSettings extends PluginSettingTab {
     new Setting(el).setName('Zotero 与引用配置').setDesc('检查引用插件、Pandoc、文献库和 CSL；Windows 与 macOS 使用同一个插件包，各自配置本机路径。')
       .addButton(b=>b.setButtonText('检查配置').onClick(()=>this.plugin.checkCitationSetup()))
       .addButton(b=>b.setButtonText('打开引用设置').onClick(()=>this.plugin.openCitationSettings()));
+    if(this.editLanguage==='zh') {
+    const translation=el.createEl('details',{cls:'pcp-settings-section'});
+    translation.open=!this.plugin.settings.translationModel;
+    translation.createEl('summary',{text:'AI 英文题注翻译（按需）'});
+    translation.createEl('p',{text:'支持 Chat Completions 兼容接口和本地模型。仅点击生成时发送文字语境，不发送图片。批量窗口自动保存 API 配置，密钥使用 Obsidian 密钥存储。'});
+    for(const [key,title,placeholder] of [['translationEndpoint','API 基础地址','https://api.example.com/v1'],['translationModel','模型名称','服务商提供的模型 ID']])
+      new Setting(translation).setName(title).addText(t=>t.setPlaceholder(placeholder).setValue(this.plugin.settings[key]).onChange(async v=>{this.plugin.settings[key]=v.trim();await this.plugin.saveData(this.plugin.settings);}));
+    new Setting(translation).setName('API 密钥').setDesc('本地无鉴权模型可留空。自动保存到 Obsidian 密钥存储，下次自动读取。')
+      .addText(t=>{t.inputEl.type='password';t.setValue(this.plugin.translationApiKey||'').onChange(async v=>{try{await this.plugin.saveTranslationDefaults(this.plugin.settings.translationEndpoint,this.plugin.settings.translationModel,this.plugin.settings.translationReasoning,v.trim());}catch{new Notice('密钥未保存，请检查 Obsidian 密钥存储是否可用。');}});});
+    new Setting(translation).setName('翻译当前稿件题注').addButton(b=>b.setButtonText('选择题注').onClick(()=>this.plugin.openCaptionTranslation()));
+    new Setting(translation).setName('整篇英文图表题').setDesc('批量生成、逐条编辑和勾选，确认后统一写入。仅中文稿可用。')
+      .addButton(b=>b.setButtonText('批量生成英文图表题').onClick(()=>this.plugin.openBatchCaptionTranslation()));
+    }
     new Setting(el).setName('稿件性能模式').setDesc('自动：达到 8 万字符或约 60 个图片标记时启用轻量写作：暂停复杂图注、交叉引用替换和自动全文检查；手动检查仍可用。不会更改稿件内容。')
       .addDropdown(d=>d.addOptions({auto:'自动（大稿件优先轻量）',normal:'普通',lite:'轻量写作（手动检查）'}).setValue(this.plugin.settings.performanceMode==='large'?'lite':this.plugin.settings.performanceMode).onChange(async value=>{
         await this.plugin.setPerformanceMode(value);
@@ -706,6 +747,7 @@ module.exports = class PaperCaptionPreview extends Plugin {
   async onload() {
     this.disposed = false;
     this.settings = Object.assign({}, JSON.parse(JSON.stringify(DEFAULTS)), await this.loadData());
+    try {this.translationApiKey=await this.app.secretStorage?.getSecret('paper-writing-view-translation')||'';}catch {this.translationApiKey='';}
     this.analysisCache = new Map(); this.sizeSnapshots = new Map(); this.languageCache = new Map(); this.largePending = new Map();
     this.imageDimensions = new Map();
     this.nativeImages = new Set();
@@ -781,6 +823,14 @@ module.exports = class PaperCaptionPreview extends Plugin {
     this.addCommand({id:'check-whole-document',name:'全文检查与刷新',callback:()=>this.checkWholeDocument()});
     this.addCommand({id: 'diagnose-captions', name: '检查当前笔记图注', callback: () => this.diagnose()});
     this.addCommand({id: 'figure-navigation', name: '图表与公式导航', callback: () => this.openNavigation()});
+    const chineseCommand=(id,name,run)=>this.addCommand({id,name,checkCallback:checking=>{
+      const view=this.markdownView(),doc=view?.editor?.cm?.state?.doc;
+      const sample=doc?doc.sliceString(0,Math.min(doc.length,30000)):view?.editor?.getValue()||'';
+      if(!view?.file || this.languageFor(view.file,sample)!=='zh')return false;
+      if(!checking)run(view);return true;
+    }});
+    chineseCommand('translate-caption','翻译英文图题／表题',view=>this.openCaptionTranslation(view));
+    chineseCommand('batch-translate-captions','批量生成英文图表题',view=>this.openBatchCaptionTranslation(view));
     this.addRibbonIcon?.('list-tree', '图表与公式导航', () => this.openNavigation());
     this.addCommand({id: 'fix-current-blank', name: '补齐光标附近这一处空行', callback: () => this.fixBlankLines(undefined, true)});
     this.addCommand({id:'manuscript-language',name:'选择当前稿件语言',callback:()=>this.selectManuscriptLanguage()});
@@ -1111,6 +1161,8 @@ module.exports = class PaperCaptionPreview extends Plugin {
     modal.modalEl.classList.add('pcp-navigation-modal');
     modal.contentEl.createEl('h2',{text:'图表与公式导航'});
     modal.contentEl.createEl('p',{text:path});
+    const chinese=this.languageFor(view.file,view.editor.getValue())==='zh';
+    if(chinese)modal.contentEl.createEl('button',{text:'批量生成英文图表题'}).onclick=()=>{modal.close();this.openBatchCaptionTranslation(view);};
     const search=modal.contentEl.createEl('input',{attr:{type:'search',placeholder:'搜索标题、标签、路径或问题'}});
     const list=modal.contentEl.createDiv({cls:'pcp-navigation-list'});
     const draw=()=>{
@@ -1123,13 +1175,335 @@ module.exports = class PaperCaptionPreview extends Plugin {
       const query=search.value.trim().toLocaleLowerCase();
       const filtered=rows.filter(r=>[r.title,r.id,r.src,r.type].join(' ').toLocaleLowerCase().includes(query));
       if(!filtered.length)list.createEl('p',{text:'没有匹配的图表、公式或问题。'});
-      for(const row of filtered) new Setting(list).setName(`${row.type}${row.number??''} · ${row.title}`).setDesc(`第 ${text.slice(0,row.from).split('\n').length} 行${row.id?' · '+row.id:''}`)
+      for(const row of filtered) {
+        const setting=new Setting(list).setName(`${row.type}${row.number??''} · ${row.title}`).setDesc(`第 ${text.slice(0,row.from).split('\n').length} 行${row.id?' · '+row.id:''}`)
         .addButton(b=>b.setButtonText('跳转').onClick(()=>{
           if(view.file?.path!==path || view.editor.getValue()!==text) {draw();return new Notice('笔记已变化，已刷新导航，请重新选择。');}
           modal.close();const pos=view.editor.offsetToPos(row.from);view.editor.setCursor(pos);view.editor.scrollIntoView({from:pos,to:pos},true);view.editor.focus();
         }));
+        if(chinese && row.id && ['图','表'].includes(row.type)) setting.addButton(b=>b.setButtonText('翻译英文题注').onClick(()=>{
+          if(view.file?.path!==path || view.editor.getValue()!==text) {draw();return new Notice('笔记已变化，请重新选择。');}
+          modal.close();this.openCaptionTranslation(view,row.from);
+        }));
+      }
     };
     search.oninput=draw;modal.contentEl.createEl('button',{text:'刷新列表'}).onclick=draw;draw();modal.open();return modal;
+  }
+  async waitTranslationRetry(seconds, cancelled) {
+    for(let i=0;i<seconds;i++){
+      if(cancelled())throw new Error('翻译服务重试已取消。');
+      await new Promise(resolve=>globalThis.setTimeout(resolve,1000));
+    }
+    if(cancelled())throw new Error('翻译服务重试已取消。');
+  }
+  async translationText(request, apiKey, progress=()=>{}, cancelled=()=>this.disposed) {
+    const options={...request,headers:{...request.headers,...(apiKey?{Authorization:'Bearer '+apiKey}:{})}};
+    let timeout;
+    try {
+      for(let attempt=0;attempt<3;attempt++){
+      if(cancelled())throw new Error('翻译服务请求已取消。');
+      const response=await Promise.race([requestUrl(options),new Promise((_,reject)=>{
+        timeout=globalThis.setTimeout(()=>reject(new Error('翻译服务等待超过 60 秒，请稍后重试。')),60000);
+      })]);
+      globalThis.clearTimeout(timeout);
+      if(response.status<200 || response.status>=300){
+        const failure=translationFailure(response,apiKey);
+        if(failure.retry && attempt<2){
+          const header=Object.entries(response.headers||{}).find(([k])=>k.toLowerCase()==='retry-after')?.[1];
+          const parsed=header?(Number.isFinite(Number(header))?Number(header):Math.ceil((Date.parse(header)-Date.now())/1000)):NaN;
+          const delay=Number.isFinite(parsed)&&parsed>0?Math.ceil(parsed):15*(attempt+1);
+          if(delay>120)throw new Error(failure.message+'。服务商要求等待超过两分钟，请稍后重试。');
+          progress(failure.message+'。将在 '+delay+' 秒后重试（'+(attempt+1)+'/2），可关闭窗口停止。');
+          await this.waitTranslationRetry(delay,cancelled);continue;
+        }
+        throw new Error(failure.message);
+      }
+      const value=response.json?.choices?.[0]?.message?.content;
+      if(typeof value!=='string')throw new Error('服务未返回兼容的文本译文。');
+      return value;
+      }
+    } catch(error) {
+      throw new Error(error.message?.startsWith('翻译服务') || /兼容/.test(error.message)?error.message:'请求失败，请检查网络、API 地址和模型配置。');
+    } finally {globalThis.clearTimeout(timeout);}
+  }
+  async saveTranslationDefaults(endpoint,model,reasoning,key) {
+    const base=translationBase(endpoint);
+    const storage=this.app.secretStorage;
+    if(key && !storage?.setSecret)throw new Error('当前 Obsidian 不支持密钥存储，未保存；请更新 Obsidian。');
+    if(key)await storage.setSecret('paper-writing-view-translation',key);
+    else if(storage?.deleteSecret)await storage.deleteSecret('paper-writing-view-translation');
+    this.settings.translationEndpoint=base;this.settings.translationModel=model.trim();this.settings.translationReasoning=reasoning;
+    this.translationApiKey=key;
+    await this.saveData(this.settings);
+  }
+  openBatchCaptionTranslation(sourceView) {
+    const view=sourceView || this.markdownView();
+    if(!view?.file || !view.editor)return new Notice('请先打开 Markdown 稿件。');
+    const text=view.editor.getValue(),path=view.file.path;
+    if(this.languageFor(view.file,text)!=='zh')return new Notice('批量英文图表题仅用于中文稿件。');
+    const parsed=scanDocument(text),prepared={parsed,targets:captionTargets(text,parsed),masked:maskExamples(text)};
+    if(!prepared.targets.length)return new Notice('未找到带标签的独立 Markdown 图题或标准表题。');
+    const entries=prepared.targets.map(row=>{
+      try {protectCaption(row.caption);const plan=captionTranslationPlan(text,row,'excerpt',prepared);return {row,plan,translation:plan.existing?.content.replace(/^(?:Fig\.?|Figure|Table)\s+\[-@(?:fig|tbl):[\w:-]+\]\s*/i,'')||'',status:plan.existing?'已有英文题注，默认保留':'待生成'};}
+      catch(error){return {row,problem:error.message,translation:''};}
+    });
+    const selected=new Set(entries.filter(e=>!e.problem && !e.plan.existing));
+    const modal=new Modal(this.app);modal.modalEl.classList.add('pcp-translation-modal','pcp-batch-translation-modal');
+    modal.contentEl.createEl('h2',{text:'批量生成英文图表题 · 中文稿'});
+    modal.contentEl.createEl('p',{text:'可一次选择整篇图题和表题，插件自动排队处理，无总条数限制。已有英文题注默认保留；译文可逐条修改，确认后统一写入、一次撤销。重新生成会覆盖勾选项的当前草稿。'});
+    const handoff=modal.contentEl.createDiv({cls:'pcp-review-actions'});
+    const copyTask=handoff.createEl('button',{text:'复制全文与翻译要求（无需 API）'});
+    const importTask=handoff.createEl('button',{text:'导入 AI 译文'});
+    modal.contentEl.createEl('p',{text:'无需 API：复制任务交给你正在使用的 AI 对话，让 AI 阅读全文并返回题名译文，再导入此处集中检查、修改。插件不会自动打开或操作其他 AI 应用。'});
+    let busy=false,closed=false,page=0,requests=[],requestKey='',scope='full';
+    const apiSection=modal.contentEl.createEl('details');apiSection.createEl('summary',{text:'直接调用 API（可选）'});
+    const controls=apiSection.createDiv({cls:'pcp-batch-api'});
+    const select=(parent,label,options,value)=>{
+      const wrap=parent.createEl('label',{text:label+' '}),element=wrap.createEl('select');
+      for(const [key,title] of Object.entries(options))element.createEl('option',{text:title,attr:{value:key}});
+      element.value=value;return element;
+    };
+    const input=(label,value,type='text')=>{const wrap=controls.createEl('label',{text:label});const element=wrap.createEl('input',{attr:{type}});element.value=value;return element;};
+    const endpoint=input('API 地址',this.settings.translationEndpoint),model=input('模型名称',this.settings.translationModel),key=input('API 密钥',this.translationApiKey||'','password');
+    const modelSelect=select(controls,'可用模型（先获取列表）',{'':'保留手动填写'},'');
+    const fetchModels=controls.createEl('button',{text:'获取模型列表'});
+    const reasoning=select(controls,'推理模式',{'default':'模型默认（推荐）'},'default');
+    reasoning.parentElement?.hide();
+    reasoning.style.display='none';
+    const effortBox=controls.createDiv({cls:'pcp-effort-control'}),effortLabel=effortBox.createEl('div',{text:'Effort · 模型默认'});
+    const effort=effortBox.createEl('input',{attr:{type:'range',min:'0',max:'6',step:'1','aria-label':'推理强度'}});
+    effortBox.createDiv({cls:'pcp-effort-ends',text:'更快 ←                         → 更充分思考'});
+    let effortValues=[];
+    const syncEffort=()=>{effort.value=String(Math.max(0,effortValues.indexOf(reasoning.value)));const value=effortValues[Number(effort.value)];effortLabel.setText('Effort · '+({default:'模型默认',enabled:'开启深度思考',disabled:'关闭思考'}[value]||value));};
+    const reasoningHint=controls.createEl('small',{text:'推理设置不等于模型能力排名；深度思考通常更慢。'});
+    const updateReasoning=()=>{
+      const old=reasoning.value;reasoning.empty();
+      const zhipu=/^https:\/\/open\.bigmodel\.cn(?:\/|$)/i.test(endpoint.value.trim());
+      const options=zhipu?{disabled:'关闭思考，优先速度（模型需支持）',default:'模型默认（推荐）',enabled:'开启深度思考（模型需支持）'}:
+        {default:'模型默认',minimal:'Minimal',low:'Low',medium:'Medium',high:'High',xhigh:'XHigh',max:'Max'};
+      for(const [value,title] of Object.entries(options))reasoning.createEl('option',{text:title,attr:{value}});
+      reasoning.value=Object.hasOwn(options,old)?old:'default';
+      effortValues=Object.keys(options);effort.max=String(effortValues.length-1);syncEffort();
+      reasoningHint.setText(zhipu?'智谱只有默认／开启思考／关闭思考三档，不支持通用 Max 等级。':'非默认档位按原值发送 reasoning_effort；Max / XHigh 等需服务商明确支持，报错请调回默认。滑块不表示模型智力排名。');
+    };
+    updateReasoning();
+    if([...reasoning.children].some(o=>o.value===this.settings.translationReasoning))reasoning.value=this.settings.translationReasoning;
+    syncEffort();
+    const scopeSelect=select(controls,'语境范围',{full:'全文（默认，受模型上下文上限约束）',excerpt:'摘要＋各图表附近正文'},scope);
+    modal.contentEl.createEl('p',{text:'在线 API 会接收预览中的文字，可能产生费用；本地模型可不填密钥。不读取图片文件。关闭后停止后续批次，已发送的请求无法撤回。'});
+    const status=modal.contentEl.createEl('p'),details=modal.contentEl.createEl('details');details.createEl('summary',{text:'查看将发送的请求正文（不含密钥）'});
+    const savedStatus=controls.createEl('small',{text:'API 地址、模型、密钥和推理模式修改后自动保存。密钥使用 Obsidian 密钥存储。'});
+    let saveTimer,savePending=false;
+    const persist=()=>{
+      globalThis.clearTimeout(saveTimer);if(!savePending)return;
+      savePending=false;
+      const values=[endpoint.value,model.value,reasoning.value,key.value.trim()];
+      savedStatus.setText('正在保存 API 配置……');
+      const job=async()=>{
+        try {await this.saveTranslationDefaults(...values);if(!closed)savedStatus.setText('API 配置已自动保存，下次自动填入。');}
+        catch {if(!closed)savedStatus.setText('配置未保存：请检查地址是否完整，或 Obsidian 密钥存储是否可用。');}
+      };
+      this.translationSaveQueue=(this.translationSaveQueue||Promise.resolve()).catch(()=>{}).then(job);
+      return this.translationSaveQueue;
+    };
+    const queueSave=()=>{savePending=true;globalThis.clearTimeout(saveTimer);savedStatus.setText('修改待保存……');saveTimer=globalThis.setTimeout(persist,600);};
+    const sent=details.createEl('pre');
+    const actions=modal.contentEl.createDiv({cls:'pcp-review-actions'});
+    const button=(label,fn)=>{const b=actions.createEl('button',{text:label});b.onclick=fn;return b;};
+    const invalidate=()=>{requests=[];sent.setText('选择或 API 已变化，请重新预览。');generate.disabled=true;};
+    const stale=()=>this.disposed || view.file?.path!==path || view.editor.getValue()!==text || this.languageFor(view.file,text)!=='zh';
+    copyTask.onclick=async()=>{
+      if(busy)return;if(stale())return new Notice('稿件已变化，请重新打开。');
+      try {
+        const rows=entries.filter(e=>selected.has(e)&&!e.problem).map(e=>e.row),prompt=captionHandoff(text,rows);
+        await navigator.clipboard.writeText(prompt);status.setText('已复制全文与 '+rows.length+' 条题名。粘贴到 AI 对话，取得 JSON 译文后点击“导入 AI 译文”。原稿尚未修改。');
+      }catch(error){status.setText(error.message||'复制失败，请检查剪贴板权限。');}
+    };
+    importTask.onclick=()=>{
+      if(busy)return;if(stale())return new Notice('稿件已变化，请重新打开。');
+      const review=new Modal(this.app);review.modalEl.classList.add('pcp-translation-modal');
+      review.contentEl.createEl('h2',{text:'导入 AI 返回的英文图表题'});
+      review.contentEl.createEl('p',{text:'粘贴完整 JSON，导入只更新待审阅草稿，不直接修改笔记。可关闭主窗口后再打开导入，原题名必须仍与任务一致。'});
+      const input=review.contentEl.createEl('textarea',{cls:'pcp-translation-output',attr:{rows:'12','aria-label':'AI 译文 JSON'}});
+      const notice=review.contentEl.createEl('p');
+      review.contentEl.createEl('button',{text:'导入到审阅列表'}).onclick=()=>{
+        if(closed||stale()){notice.setText('稿件或主窗口已变化，请重新打开。');return;}
+        try {
+          const results=importCaptionHandoff(input.value,entries.filter(e=>!e.problem).map(e=>e.row));
+          selected.clear();
+          for(const entry of entries){const key=entry.row.type+':'+entry.row.id;if(results.has(key)){entry.translation=results.get(key);entry.status='AI 对话译文，待审阅';selected.add(entry);}}
+          invalidate();page=0;draw();review.close();status.setText('已导入 '+results.size+' 条译文。请逐条检查、修改，再确认写入勾选项；原稿尚未修改。');
+        }catch(error){notice.setText(error.message);}
+      };
+      review.open();return review;
+    };
+    const preview=button('预览发送内容',()=>{
+      if(busy)return;if(stale())return new Notice('稿件或语言已变化，请重新打开。');
+      try {
+        const chosen=entries.filter(e=>selected.has(e)&&!e.problem);
+        if(!chosen.length)throw new Error('请先勾选需要生成的图表题。');
+        for(const entry of chosen)entry.plan=captionTranslationPlan(text,entry.row,scope,prepared);
+        const settings={translationEndpoint:endpoint.value,translationModel:model.value,translationReasoning:reasoning.value};requests=[];
+        for(let i=0;i<chosen.length;i+=20){const batch=chosen.slice(i,i+20);requests.push({entries:batch,request:captionBatchRequest(settings,batch.map(e=>e.plan))});}
+        requestKey=key.value.trim();
+        sent.setText(requests.map((r,i)=>'批次 '+(i+1)+' · '+r.request.url+'\n'+r.request.body).join('\n\n'));
+        status.setText('已准备 '+chosen.length+' 条题注，共 '+requests.length+' 次 API 请求。全文语境 '+(scope==='full'?prepared.masked.length:'未启用')+' 字符；每批会重复发送语境，字符数不等于 token 数，超限请切换节选。');generate.disabled=false;
+      } catch(error){requests=[];generate.disabled=true;status.setText(error.message);}
+    });
+    const generate=button('生成所选英文图表题',async()=>{
+      if(busy||!requests.length)return;if(stale())return new Notice('稿件已变化，请重新打开。');
+      busy=true;setBusy();let done=0;
+      try {
+        for(const batch of requests){
+          if(closed||stale())break;
+          status.setText('正在生成：已完成 '+done+' / '+requests.reduce((n,b)=>n+b.entries.length,0)+' 条……');
+          const {protections,...request}=batch.request;
+          const response=await this.translationText(request,requestKey,message=>{if(!closed)status.setText(message);},()=>closed||stale());
+          if(closed||stale())break;
+          const translations=parseCaptionBatch(response,protections);
+          for(const entry of batch.entries){entry.translation=translations.get(entry.row.type+':'+entry.row.id);entry.status='已生成，请核对并编辑';}done+=batch.entries.length;
+          draw();
+        }
+        if(!closed)status.setText(stale()?'稿件已变化，停止生成；请重新打开。':'已生成 '+done+' 条。检查英文题名，可编辑并取消勾选不采用的条目。');
+      } catch(error){if(!closed)status.setText('生成已停止：'+error.message+' 已完成的草稿保留，可取消勾选未完成项后写入。');}
+      finally {busy=false;if(!closed){setBusy();draw();}}
+    });generate.disabled=true;
+    const apply=button('确认写入勾选项',()=>{
+      if(busy)return;if(stale())return new Notice('稿件或语言已变化，请重新打开，未写入。');
+      const chosen=entries.filter(e=>selected.has(e)&&!e.problem);
+      if(!chosen.length || chosen.some(e=>!e.translation.trim()))return new Notice('勾选项还有空译文，请生成、填写或取消勾选。');
+      if(!view.editor.cm?.dispatch)return new Notice('当前编辑器不支持单次撤销，未写入。');
+      try {
+        const now=new Date(),pad=n=>String(n).padStart(2,'0');
+        const timestamp=`${now.getFullYear()}.${pad(now.getMonth()+1)}.${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+        const changes=captionBatchEdits(text,chosen,timestamp);
+        view.editor.cm.dispatch({changes});modal.close();new Notice('已写入 '+chosen.length+' 条英文图表题，可一次撤销。');
+      } catch(error){status.setText(error.message);}
+    });
+    button('只选缺失英文题注',()=>{if(busy)return;selected.clear();entries.filter(e=>!e.problem&&!e.plan.existing).forEach(e=>selected.add(e));invalidate();draw();});
+    button('只选未完成草稿',()=>{if(busy)return;selected.clear();entries.filter(e=>!e.problem&&!e.translation.trim()).forEach(e=>selected.add(e));invalidate();draw();});
+    button('全部选择',()=>{if(busy)return;entries.filter(e=>!e.problem).forEach(e=>selected.add(e));invalidate();draw();});
+    button('清空选择',()=>{if(busy)return;selected.clear();invalidate();draw();});
+    const pager=modal.contentEl.createDiv({cls:'pcp-review-actions'}),summary=pager.createEl('span');
+    const previous=pager.createEl('button',{text:'上一页'}),next=pager.createEl('button',{text:'下一页'}),rowsHost=modal.contentEl.createDiv({cls:'pcp-review-list'});
+    const draw=()=>{
+      rowsHost.empty();summary.setText('已选 '+selected.size+' / '+entries.length+' 条 · 第 '+(page+1)+' / '+Math.ceil(entries.length/30)+' 页');
+      previous.disabled=page===0;next.disabled=(page+1)*30>=entries.length;
+      for(const entry of entries.slice(page*30,page*30+30)){
+        const row=rowsHost.createDiv({cls:'pcp-review-row'}),label=row.createEl('label',{cls:'pcp-caption-review-heading'});
+        const check=label.createEl('input',{attr:{type:'checkbox'}});check.checked=selected.has(entry);check.disabled=busy||!!entry.problem;
+        label.appendText((entry.row.type==='fig'?'图 ':'表 ')+(entry.row.number??'')+' '+entry.row.caption);
+        check.onchange=()=>{if(check.checked)selected.add(entry);else selected.delete(entry);invalidate();summary.setText('已选 '+selected.size+' / '+entries.length+' 条');};
+        row.createEl('p',{cls:'pcp-caption-review-status',text:entry.problem||entry.status});
+        const output=row.createEl('textarea',{cls:'pcp-translation-output',attr:{rows:'2','aria-label':'英文题名 '+(entry.row.type==='fig'?'图 ':'表 ')+(entry.row.number??'')+' '+entry.row.caption}});output.value=entry.translation;output.disabled=busy||!!entry.problem;
+        output.oninput=()=>{entry.translation=output.value;entry.status='已手动编辑';};
+      }
+    };
+    const setBusy=()=>{preview.disabled=generate.disabled=apply.disabled=copyTask.disabled=importTask.disabled=busy;scopeSelect.disabled=reasoning.disabled=effort.disabled=modelSelect.disabled=fetchModels.disabled=busy;endpoint.disabled=model.disabled=key.disabled=busy;draw();};
+    previous.onclick=()=>{page--;draw();};next.onclick=()=>{page++;draw();};
+    scopeSelect.onchange=()=>{scope=scopeSelect.value;invalidate();};
+    for(const field of [endpoint,model,key])field.oninput=()=>{if(field===endpoint){key.value='';updateReasoning();modelSelect.empty();modelSelect.createEl('option',{text:'保留手动填写',attr:{value:''}});}invalidate();queueSave();};
+    reasoning.onchange=()=>{invalidate();queueSave();};
+    effort.oninput=()=>{reasoning.value=effortValues[Number(effort.value)];syncEffort();invalidate();queueSave();};
+    modelSelect.onchange=()=>{if(modelSelect.value){model.value=modelSelect.value;invalidate();queueSave();}};
+    fetchModels.onclick=async()=>{
+      if(busy)return;
+      let base;
+      try {base=translationBase(endpoint.value);}catch(error){status.setText(error.message);return;}
+      const source=endpoint.value,credential=key.value.trim();
+      fetchModels.disabled=true;status.setText('正在获取服务商模型列表……');
+      let timeout;
+      try {
+        const response=await Promise.race([requestUrl({url:base+'/models',method:'GET',headers:credential?{Authorization:'Bearer '+credential}:{},throw:false}),new Promise((_,reject)=>{timeout=globalThis.setTimeout(()=>reject(new Error('获取模型超时，请重试或手动填写。')),20000);})]);
+        if(closed||source!==endpoint.value)return;
+        if(response.status!==200)throw new Error('模型列表返回 HTTP '+response.status+'；部分服务不提供列表，可手动填写模型 ID。');
+        const ids=[...new Set((response.json?.data||[]).map(row=>row?.id).filter(id=>typeof id==='string'&&id.length<250))].sort();
+        if(!ids.length)throw new Error('服务未返回兼容的模型列表，请手动填写模型 ID。');
+        modelSelect.empty();modelSelect.createEl('option',{text:'选择模型',attr:{value:''}});
+        ids.forEach(id=>modelSelect.createEl('option',{text:id,attr:{value:id}}));
+        if(ids.includes(model.value))modelSelect.value=model.value;
+        status.setText('已获取 '+ids.length+' 个模型。列表不代表账号调用权限，也不提供智力排名；请选支持文本对话的模型。');
+      } catch(error){if(!closed)status.setText(/模型|HTTP|兼容/.test(error.message)?error.message:'获取失败，请检查地址和密钥，或手动填写模型 ID。');}
+      finally{globalThis.clearTimeout(timeout);fetchModels.disabled=busy;}
+    };
+    const oldClose=modal.onClose?.bind(modal);modal.onClose=()=>{persist();closed=true;requestKey='';key.value='';oldClose?.();};
+    status.setText('默认勾选缺少英文题注的图表。先检查 API 配置，再预览发送内容。');draw();modal.open();return modal;
+  }
+  openCaptionTranslation(sourceView, targetOffset) {
+    const view=sourceView || this.markdownView();
+    if(!view?.file || !view.editor) return new Notice('请先打开 Markdown 稿件。');
+    if(this.languageFor(view.file,view.editor.getValue())!=='zh')return new Notice('英文图表题翻译仅用于中文稿件。');
+    const text=view.editor.getValue(), path=view.file.path, rows=captionTargets(text);
+    if(!rows.length) return new Notice('未找到带有唯一标签的 Markdown 图题或表题。Wiki 图片请先使用带图题和 {#fig:id} 的 Markdown 图片。');
+    const modal=new Modal(this.app); modal.modalEl.classList.add('pcp-translation-modal');
+    modal.contentEl.createEl('h2',{text:'结合稿件语境翻译英文题注'});
+    modal.contentEl.createEl('button',{text:'配置 API 与模型'}).onclick=()=>{
+      modal.close();this.app.setting.open();this.app.setting.openTabById(this.manifest.id);
+    };
+    modal.contentEl.createEl('p',{text:'只在点击“发送并生成译文”后请求所选服务。先核对下面的发送内容，确认译文后才会写入笔记。'});
+    let index=Math.max(0,rows.findIndex(r=>r.from===targetOffset)), scope='full', plan, request, busy=false, accepted=false, generation=0, closed=false;
+    const selection=new Setting(modal.contentEl).setName('选择图题／表题');
+    selection.addDropdown(d=>d.addOptions(Object.fromEntries(rows.map((r,i)=>[String(i),(r.type==='fig'?'图':'表')+' '+r.id+' · '+r.caption.slice(0,65)]))).setValue(String(index)).onChange(v=>{index=Number(v);draw();}));
+    new Setting(modal.contentEl).setName('语境范围').addDropdown(d=>d.addOptions({full:'全文（默认，受模型上下文上限约束）',excerpt:'摘要＋附近正文＋已有英文题注'}).setValue('full').onChange(v=>{scope=v;draw();}));
+    const info=modal.contentEl.createDiv(), original=modal.contentEl.createEl('pre');
+    const details=modal.contentEl.createEl('details');details.createEl('summary',{text:'查看实际发送的请求正文'});
+    const sent=details.createEl('pre');
+    const status=modal.contentEl.createEl('p');
+    modal.contentEl.createEl('p',{text:'英文译文（生成后可编辑；保留数字、引用和上下标）'});
+    const output=modal.contentEl.createEl('textarea',{cls:'pcp-translation-output',attr:{rows:'5','aria-label':'英文题注译文'}});
+    const controls=modal.contentEl.createDiv({cls:'pcp-review-actions'});
+    const generate=controls.createEl('button',{text:'发送并生成译文'});
+    const apply=controls.createEl('button',{text:'确认写入英文题注'});apply.disabled=true;
+    controls.createEl('button',{text:'关闭'}).onclick=()=>modal.close();
+    const stale=()=>this.disposed || view.file?.path!==path || view.editor.getValue()!==text;
+    const draw=()=>{
+      generation++; accepted=false;output.value='';apply.disabled=true;plan=null;request=null;
+      original.setText(rows[index].caption);
+      try {
+        plan=captionTranslationPlan(text,rows[index],scope);
+        request=captionTranslationRequest(this.settings,plan);
+        info.setText('服务：'+request.url+' · 模型：'+this.settings.translationModel+' · 语境 '+plan.context.length+' 字符'+(plan.existing?' · 写入时将替换已有英文题注':' · 写入时新增英文题注'));
+        sent.setText(request.body);status.setText('请核对发送内容；原稿中代码、注释和 frontmatter 已屏蔽。不读取图片或链接文件。');generate.disabled=busy;
+      } catch(error) {info.setText('');sent.setText('');status.setText(error.message);generate.disabled=true;}
+    };
+    const close=modal.onClose?.bind(modal);
+    modal.onClose=()=>{closed=true;generation++;close?.();};
+    generate.onclick=async()=>{
+      if(busy || !request) return;
+      if(stale()) return new Notice('笔记已变化，请重新打开翻译窗口。');
+      const token=++generation, current=request;
+      busy=true;generate.disabled=true;apply.disabled=true;accepted=false;status.setText('正在生成译文，可关闭窗口忽略结果……');
+      let timeout;
+      try {
+        const {protectedCaption,...options}=current;
+        options.headers={...options.headers,...(this.translationApiKey?{Authorization:'Bearer '+this.translationApiKey}:{})};
+        const response=await Promise.race([requestUrl(options),new Promise((_,reject)=>{
+          timeout=globalThis.setTimeout(()=>reject(new Error('翻译服务等待超过 60 秒，请稍后重试。')),60000);
+        })]);
+        if(token!==generation || this.disposed) return;
+        if(response.status<200 || response.status>=300) throw new Error('翻译服务返回 HTTP '+response.status+'，请检查地址、模型和密钥。');
+        const data=response.json;
+        const value=data?.choices?.[0]?.message?.content;
+        if(typeof value!=='string') throw new Error('服务未返回兼容的文本译文，请检查接口类型。');
+        output.value=validateCaptionTranslation(value,protectedCaption);accepted=true;
+        status.setText(stale()?'笔记已变化：译文可查看，但不能写入，请重新翻译。':'译文已生成，请核对术语和原意后确认写入。');
+        apply.disabled=stale();
+      } catch(error) {
+        if(token===generation) status.setText(error.message?.startsWith('翻译服务') || /译文|兼容/.test(error.message)?error.message:'请求失败，请检查网络、API 地址和模型配置。');
+      } finally {globalThis.clearTimeout(timeout);busy=false;if(!closed){if(token===generation)generate.disabled=false;else if(plan)draw();}}
+    };
+    apply.onclick=()=>{
+      if(!accepted || busy) return;
+      if(stale()) return new Notice('笔记已变化，请重新翻译，未写入。');
+      if(!view.editor.cm?.dispatch) return new Notice('当前编辑器不支持单次撤销，未写入。');
+      try {
+        const now=new Date(),pad=n=>String(n).padStart(2,'0');
+        const timestamp=`${now.getFullYear()}.${pad(now.getMonth()+1)}.${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+        view.editor.cm.dispatch({changes:captionTranslationEdits(text,plan,output.value,timestamp)});
+        modal.close();new Notice('已写入英文题注，可 Ctrl+Z / Cmd+Z 撤销。轻量模式保留源码显示。');
+      } catch(error) {status.setText(error.message);}
+    };
+    draw();modal.open();return modal;
   }
   ownsRange(text, start, end) {
     if (this.rangeText !== text) { this.rangeText = text; this.rangeFigures = scanDocument(text).figures; }
@@ -1395,6 +1769,7 @@ module.exports = class PaperCaptionPreview extends Plugin {
     modal.open(); return modal;
   }
   onunload() {
+    this.translationApiKey='';
     this.restoreScopedCitationPaths?.();
     this.disposed = true; globalThis.clearTimeout(this.refreshTimer); globalThis.clearTimeout(this.tableTimer);
     globalThis.clearTimeout(this.blankStatusTimer);

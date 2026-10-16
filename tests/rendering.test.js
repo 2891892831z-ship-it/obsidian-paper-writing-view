@@ -4,18 +4,23 @@ const fs = require('fs'), path = require('path'), vm = require('vm');
 
 async function fixture(text, options = {}) {
   const info = Symbol('editorInfo'), live = Symbol('livePreview');
-  const modals = [], notices = [];
+  const modals = [], notices = [], commands = [];
   function ui() {return {children:[],style:{},classList:{add(){},toggle(){}},setAttribute(){},setText(t){this.text=t;},empty(){this.children=[];},
     createEl(tag,spec={}){const child=ui();child.tag=tag;child.text=spec.text;this.children.push(child);return child;},
     createDiv(spec){return this.createEl('div',spec);},appendText(t){this.text=t;}};}
   class Modal {constructor(){this.modalEl=ui();this.contentEl=ui();modals.push(this);}open(){}close(){this.closed=true;}}
   class Plugin {
     async loadData() { return {citations: false, indentParagraphs: false, ...options.settings}; }
-    registerEditorExtension() {} registerEditorSuggest() {} addSettingTab() {} addCommand() {} registerEvent() {} registerInterval() {}
+    registerEditorExtension() {} registerEditorSuggest() {} addSettingTab() {} addCommand(command) {commands.push(command);} registerEvent() {} registerInterval() {}
     registerDomEvent() {}
     addStatusBarItem() { return ui(); }
   }
   class WidgetType {}
+  class Setting {
+    constructor(root){this.el=root.createDiv();}
+    setName(){return this;}setDesc(){return this;}
+    addDropdown(fn){const d={addOptions(){return this;},setValue(v){this.value=v;return this;},onChange(fn){this.change=fn;return this;}};fn(d);return this;}
+  }
   const doc = {
     createElement(tag) { return {ownerDocument:doc,tagName:tag.toUpperCase(), children:[], style:{}, dataset:{},
       classList:{add(){}}, append(...nodes){this.children.push(...nodes);},
@@ -27,7 +32,7 @@ async function fixture(text, options = {}) {
     replace: spec => ({range: (from,to) => ({...spec,from,to})}),
     widget: spec => ({range: from => ({...spec,from,to:from})})};
   const mocks = {
-    obsidian: {Plugin,Modal,Notice:class{constructor(t){notices.push(t);}},EditorSuggest:class{},PluginSettingTab:class{},editorInfoField:info,editorLivePreviewField:live,setIcon(){}},
+    obsidian: {Plugin,Modal,Setting,requestUrl:options.requestUrl,Notice:class{constructor(t){notices.push(t);}},EditorSuggest:class{},PluginSettingTab:class{},editorInfoField:info,editorLivePreviewField:live,setIcon(){}},
     '@codemirror/state': {StateField:{define: spec => spec},StateEffect:{define:()=>({})},EditorState:{languageData:{of:()=>({})}}},
     '@codemirror/view': {WidgetType,Decoration:decorations,EditorView:{decorations:{from(){}}}},
     './core': require('../src/core')
@@ -44,11 +49,165 @@ async function fixture(text, options = {}) {
     doc:{toString:()=>text,lineAt:()=>({from:0,to:text.length})},
     selection: options.selection || {ranges:[]}};
   const ranges = plugin.field.create(state), view={dom:{ownerDocument:doc},requestMeasure(){}};
-  return {ranges,view,plugin,modals,notices};
+  return {ranges,view,plugin,modals,notices,commands};
 }
 const indentOffsets = ranges =>
   // Array.from crosses the VM realm boundary so deepStrictEqual sees a host array.
   Array.from(ranges.filter(r => r.class === 'pcp-paragraph-start').map(r => r.from)).sort((a,b)=>a-b);
+
+test('translation sends only on click, previews before write, protects session secret and refuses stale acceptance',async()=>{
+ let text='![中文 CO<sub>2</sub> 0.1%](a.png){#fig:a}\n\nNearby context.',requests=[],calls=0;
+ const {plugin}=await fixture(text,{frontmatter:{lang:'zh-CN'},settings:{performanceMode:'lite',translationEndpoint:'http://localhost:11434/v1',translationModel:'local'},
+  requestUrl:async options=>{requests.push(options);const body=JSON.parse(options.body);const caption=JSON.parse(body.messages[1].content).caption;return {status:200,json:{choices:[{message:{content:caption.replace('中文','English')}}]}};}});
+ plugin.translationApiKey='session-secret';
+ const source={file:{path:'note.md'},editor:{getValue:()=>text,cm:{dispatch({changes}){calls++;for(const c of Array.from(changes).reverse())text=text.slice(0,c.from)+c.insert+text.slice(c.to??c.from);}}}};
+ const buttons=modal=>{const all=[];const walk=e=>{if(e.tag==='button')all.push(e);e.children.forEach(walk);};walk(modal.contentEl);return all;};
+ let modal=plugin.openCaptionTranslation(source);assert.equal(requests.length,0);assert.equal(calls,0);
+ await buttons(modal).find(b=>b.text==='发送并生成译文').onclick();
+ assert.equal(requests.length,1);assert.equal(calls,0);assert.equal(requests[0].headers.Authorization,'Bearer session-secret');
+ assert(!JSON.stringify(plugin.settings).includes('session-secret'));
+ buttons(modal).find(b=>b.text==='确认写入英文题注').onclick();assert.equal(calls,1);assert.match(text,/Fig\. \[-@fig:a\] English/);
+ modal=plugin.openCaptionTranslation(source);await buttons(modal).find(b=>b.text==='发送并生成译文').onclick();
+ text+='changed';buttons(modal).find(b=>b.text==='确认写入英文题注').onclick();assert.equal(calls,1);
+});
+
+test('translation errors and closed modals never modify a manuscript',async()=>{
+ const text='![中文](a.png){#fig:a}';let resolve,calls=0;
+ const {plugin}=await fixture(text,{settings:{translationEndpoint:'http://localhost/v1',translationModel:'local'},requestUrl:()=>new Promise(r=>{resolve=r;})});
+ const source={file:{path:'note.md'},editor:{getValue:()=>text,cm:{dispatch(){calls++;}}}};
+ const modal=plugin.openCaptionTranslation(source),controls=modal.contentEl.children.find(c=>c.children?.some(b=>b.text==='发送并生成译文'));
+ const generate=controls.children.find(b=>b.text==='发送并生成译文'),apply=controls.children.find(b=>b.text==='确认写入英文题注');
+ const pending=generate.onclick();modal.onClose();resolve({status:200,json:{choices:[{message:{content:'English'}}]}});await pending;
+ assert.equal(apply.disabled,true);apply.onclick();assert.equal(calls,0);
+});
+
+test('translation service errors, missing response text and changed placeholder values keep acceptance disabled',async()=>{
+ for(const response of [{status:401,json:{}},{status:200,json:{choices:[]}},{status:200,json:{choices:[{message:{content:'Changed 0.2'}}]}}]){
+  let writes=0;const text='![含量 0.1](a.png){#fig:a}';
+  const {plugin}=await fixture(text,{settings:{translationEndpoint:'http://localhost/v1',translationModel:'local'},requestUrl:async()=>response});
+  const modal=plugin.openCaptionTranslation({file:{path:'note.md'},editor:{getValue:()=>text,cm:{dispatch(){writes++;}}}});
+  const controls=modal.contentEl.children.find(c=>c.children?.some(b=>b.text==='发送并生成译文'));
+  await controls.children.find(b=>b.text==='发送并生成译文').onclick();
+  const accept=controls.children.find(b=>b.text==='确认写入英文题注');assert.equal(accept.disabled,true);accept.onclick();assert.equal(writes,0);
+ }
+});
+
+test('Chinese batch captions preview all requests, permit edits, and write figures and tables in one transaction',async()=>{
+ let text='中文稿件。\n\n![第一张 0.1%](a.png){#fig:a}\n\n: 表格题 {#tbl:t}\n\n| A | B |\n| --- | --- |\n| C | D |\n',writes=0,requests=0;
+ const {plugin}=await fixture(text,{frontmatter:{lang:'zh-CN'},settings:{performanceMode:'lite',translationEndpoint:'http://localhost/v1',translationModel:'local'},requestUrl:async options=>{
+  requests++;const captions=JSON.parse(JSON.parse(options.body).messages[1].content).captions;
+  return {status:200,json:{choices:[{message:{content:JSON.stringify({translations:captions.map(c=>({key:c.key,text:c.caption.replace(/[\u3400-\u9fff]+/g,'English')}))})}}]}};
+ }});
+ const source={file:{path:'note.md'},editor:{getValue:()=>text,cm:{dispatch({changes}){writes++;for(const e of Array.from(changes).reverse())text=text.slice(0,e.from)+e.insert+text.slice(e.to??e.from);}}}};
+ const modal=plugin.openBatchCaptionTranslation(source),all=()=>{const result=[];const walk=e=>{result.push(e);e.children.forEach(walk);};walk(modal.contentEl);return result;};
+ const button=label=>all().find(e=>e.tag==='button'&&e.text===label);
+ assert.equal(requests,0);button('预览发送内容').onclick();assert.equal(requests,0);
+ await button('生成所选英文图表题').onclick();assert.equal(requests,1);assert.equal(writes,0);
+ const outputs=all().filter(e=>e.tag==='textarea');assert.equal(outputs.length,2);
+ outputs[1].value='Edited table title';outputs[1].oninput();
+ button('确认写入勾选项').onclick();assert.equal(writes,1);assert.match(text,/Table \[-@tbl:t\] Edited table title/);
+});
+
+test('English manuscripts have no caption translation modal and command checks are unavailable',async()=>{
+ const text='![English figure](a.png){#fig:a}';
+ const {plugin,modals,notices,commands}=await fixture(text,{frontmatter:{lang:'en-US'}});
+ const view={file:{path:'note.md'},editor:{getValue:()=>text}};
+ plugin.openBatchCaptionTranslation(view);plugin.openCaptionTranslation(view);assert.equal(modals.length,0);assert.equal(notices.length,2);
+ plugin.markdownView=()=>view;
+ for(const id of ['translate-caption','batch-translate-captions'])assert.equal(commands.find(c=>c.id===id).checkCallback(true),false);
+});
+
+test('batch editor retains manual drafts across pages and preserves existing English by default',async()=>{
+ const text=Array.from({length:31},(_,i)=>'![中文图题](a.png){#fig:f'+i+'}'+(i===0?'\n\n::: {custom-style="Figure Caption EN"}\nFig. [-@fig:f0] Existing title\n:::':'')).join('\n\n');
+ const {plugin}=await fixture(text,{frontmatter:{lang:'zh-CN'}});
+ const modal=plugin.openBatchCaptionTranslation({file:{path:'note.md'},editor:{getValue:()=>text}});
+ const rows=modal.contentEl.children.at(-1);assert.equal(rows.children.length,30);
+ assert.equal(rows.children[0].children[0].children[0].checked,false);
+ const output=rows.children[1].children.at(-1);output.value='Manual title';output.oninput();
+ const pager=modal.contentEl.children.at(-2),next=pager.children.find(e=>e.text==='下一页'),previous=pager.children.find(e=>e.text==='上一页');
+ next.onclick();assert.equal(rows.children.length,1);previous.onclick();assert.equal(rows.children[1].children.at(-1).value,'Manual title');
+});
+
+test('model retrieval is explicit and uses only the models endpoint and session credential',async()=>{
+ const text='![中文题名](a.png){#fig:a}';let calls=[];
+ const {plugin}=await fixture(text,{frontmatter:{lang:'zh-CN'},settings:{translationEndpoint:'https://open.bigmodel.cn',translationModel:'glm-5.3'},requestUrl:async options=>{calls.push(options);return {status:200,json:{data:[{id:'glm-5.3'},{id:'glm-5.3'},{id:'glm-other'}]}};}});
+ plugin.translationApiKey='secret';const modal=plugin.openBatchCaptionTranslation({file:{path:'note.md'},editor:{getValue:()=>text}});
+ const walk=e=>[e,...e.children.flatMap(walk)];const all=walk(modal.contentEl);
+ assert.equal(calls.length,0);await all.find(e=>e.text==='获取模型列表').onclick();
+ assert.equal(calls.length,1);assert.equal(calls[0].url,'https://open.bigmodel.cn/api/paas/v4/models');assert.equal(calls[0].headers.Authorization,'Bearer secret');assert.equal(calls[0].body,undefined);
+ assert(all.some(e=>e.tag==='select'&&e.children.some(o=>o.text==='glm-other')));
+});
+
+test('translation defaults persist API settings and store keys separately; saved values reopen as editable defaults',async()=>{
+ const text='![中文题名](a.png){#fig:a}';const {plugin}=await fixture(text,{frontmatter:{lang:'zh-CN'}});
+ const secrets=new Map();let saved;
+ plugin.app.secretStorage={setSecret:(id,value)=>secrets.set(id,value),deleteSecret:id=>secrets.delete(id)};
+ plugin.saveData=async data=>{saved=JSON.parse(JSON.stringify(data));};
+ await plugin.saveTranslationDefaults('https://open.bigmodel.cn','glm-5.3','enabled','private-key');
+ assert.equal(saved.translationEndpoint,'https://open.bigmodel.cn/api/paas/v4');assert.equal(saved.translationReasoning,'enabled');
+ assert(!JSON.stringify(saved).includes('private-key'));assert.equal(secrets.get('paper-writing-view-translation'),'private-key');
+ const modal=plugin.openBatchCaptionTranslation({file:{path:'note.md'},editor:{getValue:()=>text}});
+ const walk=e=>[e,...e.children.flatMap(walk)],all=walk(modal.contentEl);
+ assert(!all.some(e=>e.text==='API 来源 '));const inputs=all.filter(e=>e.tag==='input');
+ assert.equal(inputs[0].value,saved.translationEndpoint);assert.equal(inputs[2].value,'private-key');assert(!inputs[0].disabled);
+ inputs[0].value='https://other.example/v1';inputs[0].oninput();assert.equal(inputs[2].value,'');
+ await plugin.saveTranslationDefaults('http://localhost/v1','local','default','');assert.equal(secrets.size,0);
+ delete plugin.app.secretStorage;await assert.rejects(plugin.saveTranslationDefaults('https://example.org','model','default','secret'),/Obsidian/);
+});
+
+test('closing the batch dialog flushes unsaved API input and key without a save button',async()=>{
+ const text='![中文题名](a.png){#fig:a}';const {plugin}=await fixture(text,{frontmatter:{lang:'zh-CN'}});
+ const secrets=new Map();plugin.app.secretStorage={setSecret:(id,value)=>secrets.set(id,value),deleteSecret:id=>secrets.delete(id)};plugin.saveData=async()=>{};
+ const modal=plugin.openBatchCaptionTranslation({file:{path:'note.md'},editor:{getValue:()=>text}});
+ const walk=e=>[e,...e.children.flatMap(walk)],all=walk(modal.contentEl),inputs=all.filter(e=>e.tag==='input');
+ inputs[0].value='https://open.bigmodel.cn';inputs[0].oninput();inputs[1].value='glm-5.3';inputs[1].oninput();inputs[2].value='keep-key';inputs[2].oninput();
+ assert(!all.some(e=>e.text==='保存为默认配置'));modal.onClose();await plugin.translationSaveQueue;
+ assert.equal(plugin.settings.translationModel,'glm-5.3');assert.equal(secrets.get('paper-writing-view-translation'),'keep-key');
+ const next=plugin.openBatchCaptionTranslation({file:{path:'note.md'},editor:{getValue:()=>text}});
+ assert.equal(walk(next.contentEl).filter(e=>e.tag==='input')[2].value,'keep-key');
+});
+
+test('rate limiting respects Retry-After, exposes sanitized provider detail, and retries the same request',async()=>{
+ let calls=0;const {plugin}=await fixture('中文',{requestUrl:async()=>++calls<2?{status:429,headers:{'Retry-After':'3'},json:{error:{code:'rate_limit',message:'too many requests secret-value'}}}:{status:200,json:{choices:[{message:{content:'Done'}}]}}});
+ const waits=[],messages=[];plugin.waitTranslationRetry=async n=>waits.push(n);
+ assert.equal(await plugin.translationText({url:'https://example.org'},'secret-value',m=>messages.push(m)),'Done');
+ assert.deepEqual(waits,[3]);assert.equal(calls,2);assert(messages[0].includes('rate_limit'));assert(!messages[0].includes('secret-value'));
+});
+
+test('quota exhaustion never retries and unknown 429 stops after two retries',async()=>{
+ let calls=0;const {plugin}=await fixture('中文',{requestUrl:async()=>{calls++;return {status:429,json:{error:{code:'insufficient_quota',message:'balance exhausted'}}};}});
+ plugin.waitTranslationRetry=async()=>{throw Error('Should not wait');};
+ await assert.rejects(plugin.translationText({},''),/insufficient_quota/);assert.equal(calls,1);
+ const another=await fixture('中文',{requestUrl:async()=>({status:429,json:{error:{code:'unknown-limit',message:'rate limited'}}})});let waits=0;
+ another.plugin.waitTranslationRetry=async()=>{waits++;};
+ await assert.rejects(another.plugin.translationText({},''),/unknown-limit/);assert.equal(waits,2);
+});
+
+test('AI dialog import previews editable captions without any API call and writes only on acceptance',async()=>{
+ let text='![中文图题](a.png){#fig:a}',writes=0,requests=0;
+ const {plugin}=await fixture(text,{frontmatter:{lang:'zh-CN'},requestUrl:async()=>{requests++;throw Error('No API expected');}});
+ const source={file:{path:'note.md'},editor:{getValue:()=>text,cm:{dispatch({changes}){writes++;for(const c of Array.from(changes).reverse())text=text.slice(0,c.from)+c.insert+text.slice(c.to??c.from);}}}};
+ const modal=plugin.openBatchCaptionTranslation(source),walk=e=>[e,...e.children.flatMap(walk)],button=(m,t)=>walk(m.contentEl).find(e=>e.tag==='button'&&e.text===t);
+ const importer=button(modal,'导入 AI 译文').onclick();walk(importer.contentEl).find(e=>e.tag==='textarea').value=JSON.stringify({translations:[{key:'fig:a',source:'中文图题',text:'English title'}]});
+ button(importer,'导入到审阅列表').onclick();assert.equal(writes,0);assert.equal(requests,0);
+ const output=walk(modal.contentEl).find(e=>e.tag==='textarea');assert.equal(output.value,'English title');output.value='Edited title';output.oninput();
+ button(modal,'确认写入勾选项').onclick();assert.equal(writes,1);assert.match(text,/Fig\. \[-@fig:a\] Edited title/);assert.equal(requests,0);
+});
+
+test('closing a multi-request batch ignores an outstanding response and never writes automatically',async()=>{
+ let count=0,resolve,writes=0;
+ const text=Array.from({length:21},(_,i)=>'![中文图题](a.png){#fig:f'+i+'}').join('\n\n');
+ const {plugin}=await fixture(text,{frontmatter:{lang:'zh-CN'},settings:{translationEndpoint:'http://localhost/v1',translationModel:'local'},requestUrl:async options=>{
+  count++;if(count===2)return new Promise(r=>{resolve=r;});
+  const captions=JSON.parse(JSON.parse(options.body).messages[1].content).captions;
+  return {status:200,json:{choices:[{message:{content:JSON.stringify({translations:captions.map(c=>({key:c.key,text:'English title'}))})}}]}};
+ }});
+ const modal=plugin.openBatchCaptionTranslation({file:{path:'note.md'},editor:{getValue:()=>text,cm:{dispatch(){writes++;}}}});
+ const actions=modal.contentEl.children.find(c=>c.children?.some(b=>b.text==='预览发送内容'));
+ actions.children.find(b=>b.text==='预览发送内容').onclick();const pending=actions.children.find(b=>b.text==='生成所选英文图表题').onclick();
+ for(let i=0;i<20&&!resolve;i++)await Promise.resolve();assert.equal(count,2);
+ modal.onClose();resolve({status:200,json:{choices:[{message:{content:'{}'}}]}});await pending;assert.equal(writes,0);
+});
 function tags(element, tag) { return (element.tagName===tag?1:0)+(element.children||[]).reduce((n,c)=>n+tags(c,tag),0); }
 
 test('fake script status follows edits, setting and active view; preview repairs in one transaction', async()=>{
@@ -349,6 +508,22 @@ test('image and table caption lines are excluded from indentation', async () => 
   // Line starts: 0 image (owned by the figure widget), 21 blank, 22 正文.
   const {ranges}=await fixture(text,{settings:{indentParagraphs:true},selection:{ranges:[]}});
   assert.deepEqual(indentOffsets(ranges),[22]);
+});
+
+test('grouped bilingual captions render under their own images without duplicate blocks',async()=>{
+  const text='![甲](a.png){#fig:a}![乙](b.png){#fig:b}\n\n::: {custom-style="Figure Caption EN"}\nFig. [-@fig:b] Beta\n:::\n\n::: {custom-style="Figure Caption EN"}\nFig. [-@fig:a] Alpha\n:::';
+  const {ranges,view}=await fixture(text);
+  const grouped=ranges.find(r=>r.widget?.items);
+  assert(grouped);assert.equal(grouped.to,text.length);
+  assert.equal(ranges.filter(r=>r.widget?.figure?.captionDiv).length,0);
+  const dom=grouped.widget.toDOM(view);
+  const collect=e=>[e.text||e.textContent||'',...(e.children||[]).map(collect)].join('');
+  assert.equal(dom.children.length,2);
+  assert(collect(dom.children[0]).includes('Fig. 1 Alpha'));
+  assert(!collect(dom.children[0]).includes('Beta'));
+  assert(collect(dom.children[1]).includes('Fig. 2 Beta'));
+  const editing=await fixture(text,{selection:{ranges:[{from:text.indexOf('Beta'),to:text.indexOf('Beta')}]}});
+  assert.equal(editing.ranges.filter(r=>r.widget?.items).length,0);
 });
 
 test('English caption divs hide the fences and resolve suppressed references', async () => {
