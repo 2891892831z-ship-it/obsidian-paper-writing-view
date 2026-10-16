@@ -67,6 +67,21 @@ function imageAt(text, at) {
   return {from: at, imageTo: cursor + 1, caption, src};
 }
 
+// Sorted, merged spans give logarithmic ownership checks even with many captions.
+function rangeLookup(rows) {
+  const spans=[];
+  for (const row of [...rows].sort((a,b)=>a.from-b.from)) {
+    const previous=spans.at(-1);
+    if(previous && row.from<=previous.to)previous.to=Math.max(previous.to,row.to);
+    else spans.push({from:row.from,to:row.to});
+  }
+  return at=>{
+    let lo=0,hi=spans.length;
+    while(lo<hi){const mid=(lo+hi)>>>1;if(spans[mid].from<=at)lo=mid+1;else hi=mid;}
+    return lo>0 && at<spans[lo-1].to;
+  };
+}
+
 function scanDocument(text) {
   const masked = maskExamples(text);
   const definitions = [], numbers = new Map(), duplicates = new Set();
@@ -129,16 +144,52 @@ function scanDocument(text) {
     const eol = masked.indexOf('\n', eqRegex.lastIndex);
     equations.push({from: lineStart, to: eol < 0 ? masked.length : eol, id: match[1], number: eqNumbers.get(match[1])});
   }
-  const references = [];
-  const refRegex = /@(fig|tbl|eq):([\w:-]+)/g;
-  while ((match = refRegex.exec(masked))) {
-    if (escaped(masked, match.index) || figures.some(f => match.index >= f.from && match.index < f.to)) continue;
-    if (tables.some(t => match.index >= t.from && match.index < t.to)) continue;
-    if (equations.some(e => match.index >= e.from && match.index < e.to)) continue;
-    references.push({from: match.index, to: refRegex.lastIndex, type: match[1], id: match[2],
-      number: (match[1] === 'fig' ? numbers : match[1] === 'tbl' ? tableNumbers : eqNumbers).get(match[2])});
+  // Pandoc fenced divs whose custom-style is a caption style (thesis Word
+  // templates use "Figure Caption EN" / "Table Caption EN"): fences and inner
+  // caption render as one caption block. Bare colon fences close the innermost
+  // open div, so :::: wrappers around ::: divs nest correctly.
+  const captionDivs = [];
+  if (masked.includes(':::')) {
+    const isCaptionStyle = style => style != null && /caption|题注|图题|表题/i.test(style);
+    const customStyle = attrs => {
+      const found = /custom-style\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s}]+))/i.exec(attrs);
+      return found ? String(found[1] ?? found[2] ?? found[3] ?? '') : null;
+    };
+    const stack = [];
+    let offset = 0, mathMarks = 0;
+    for (const line of masked.split('\n')) {
+      const inMath = mathMarks % 2 === 1;
+      mathMarks += (line.match(/\$\$/g) || []).length;
+      const fence = !inMath && !line.includes('$$') && /^ {0,3}(:{3,})[ \t]*(.*)$/.exec(line.replace(/\r$/, ''));
+      if (fence && !fence[2].trim() && stack.length && fence[1].length >= stack.at(-1).marks) {
+        const open = stack.pop();
+        // Nested div syntax cannot be represented by a flat inline caption widget.
+        // Render leaf captions only; retain other containers as source.
+        if (isCaptionStyle(open.style) && !open.hasChild) captionDivs.push({from: open.from, to: offset + line.length,
+          contentFrom: open.contentFrom, contentTo: offset, style: open.style});
+      } else if (fence && fence[2].trim()) {
+        if (stack.length) stack.at(-1).hasChild = true;
+        stack.push({from: offset, marks: fence[1].length, style: customStyle(fence[2]), contentFrom: offset + line.length + 1});
+      }
+      offset += line.length + 1;
+    }
+    captionDivs.sort((a,b) => a.from-b.from);
   }
-  return {figures, tables, equations, numbers, tableNumbers, eqNumbers, references, duplicates};
+  const inCaptionDiv = rangeLookup(captionDivs);
+  for (const list of [figures, tables, equations])
+    for (let i = list.length - 1; i >= 0; i--) if (inCaptionDiv(list[i].from)) list.splice(i, 1);
+  const owns = rangeLookup([...captionDivs, ...figures, ...tables, ...equations]);
+  const references = [];
+  const numberMap = type => type === 'fig' ? numbers : type === 'tbl' ? tableNumbers : eqNumbers;
+  // One token pass avoids scanning all earlier references for every new reference.
+  const refRegex = /\[-@(fig|tbl|eq):([\w:-]+)\]|(-?)@(fig|tbl|eq):([\w:-]+)/g;
+  while ((match = refRegex.exec(masked))) {
+    if (escaped(masked, match.index) || owns(match.index)) continue;
+    const type = match[1] || match[4], id = match[2] || match[5];
+    references.push({from:match.index, to:refRegex.lastIndex, type, id, raw:match[0],
+      number:numberMap(type).get(id), numberOnly:!!match[1] || match[3] === '-'});
+  }
+  return {figures, tables, equations, numbers, tableNumbers, eqNumbers, references, duplicates, captionDivs};
 }
 
 function citationMap(cache) {
@@ -485,21 +536,23 @@ function numberedLabel(prefix, number) {
 function appendRichText(parent, text, options = {}) {
   const doc = parent.ownerDocument, stack = [parent];
   // Only a small, attribute-free inline whitelist is interpreted as HTML.
-  const tokens = text.split(/(<\/?(?:sub|sup|em|strong|i|b)>|==|\[@[^\]\r\n]+\]|@(?:fig|tbl|eq):[\w:-]+)/gi);
+  const tokens = text.split(/(<\/?(?:sub|sup|em|strong|i|b)>|==|\[@[^\]\r\n]+\]|\[-@(?:fig|tbl|eq):[\w:-]+\]|-?@(?:fig|tbl|eq):[\w:-]+)/gi);
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index];
     const open = /^<(sub|sup|em|strong|i|b)>$/i.exec(token);
     const close = /^<\/(sub|sup|em|strong|i|b)>$/i.exec(token);
     const ref = /^@(fig|tbl|eq):([\w:-]+)$/.exec(token);
+    const bare = /^\[-@(fig|tbl|eq):([\w:-]+)\]$/.exec(token) || /^-@(fig|tbl|eq):([\w:-]+)$/.exec(token);
     const citation = options.citations?.get(token);
     if (token === '==' && stack.at(-1).tagName === 'MARK') stack.pop();
     else if (token === '==' && tokens.slice(index + 1).includes('==')) {
       const mark = doc.createElement('mark'); stack.at(-1).append(mark); stack.push(mark);
-    } else if (ref) {
-      const number = (ref[1] === 'fig' ? options.numbers : ref[1] === 'tbl' ? options.tableNumbers : options.eqNumbers)?.get(ref[2]);
-      const label = ref[1] === 'fig' ? options.prefix || '图' : ref[1] === 'tbl' ? options.tablePrefix || '表' : options.eqPrefix || '式';
+    } else if (ref || bare) {
+      const type = ref ? ref[1] : bare[1], id = ref ? ref[2] : bare[2];
+      const number = (type === 'fig' ? options.numbers : type === 'tbl' ? options.tableNumbers : options.eqNumbers)?.get(id);
+      const label = type === 'fig' ? options.prefix || '图' : type === 'tbl' ? options.tablePrefix || '表' : options.eqPrefix || '式';
       const span = doc.createElement('span'); span.className = 'pcp-reference';
-      span.textContent = number == null ? token : numberedLabel(label,number);
+      span.textContent = number == null ? token : bare ? String(number) : numberedLabel(label, number);
       if (number == null) span.title = '未找到对应图表或公式标签';
       stack.at(-1).append(span);
     } else if (citation) {
@@ -578,7 +631,7 @@ class FigureWidget extends WidgetType {
     const appearance=plugin.appearanceFor(file,text);
     this.styleKey = JSON.stringify([appearance.align, appearance.bold, plugin.settings.citations]);
     this.renderKey = JSON.stringify([figure.caption, figure.src, figure.width, figure.id, figure.number,
-      figure.type, figure.rescue, figure.blankWarning, prefix, [...numbers || []],
+      figure.type, figure.rescue, figure.blankWarning, figure.captionDiv, prefix, [...numbers || []],
       [...figure.tableNumbers || []], [...figure.eqNumbers || []], this.styleKey]);
   }
   eq(other) { return other instanceof FigureWidget && other.plugin === this.plugin &&
@@ -599,6 +652,7 @@ class FigureWidget extends WidgetType {
     wrap._pcpWidget = this;
     this.domPeer = this;
     if (this.figure.type === 'tbl') wrap.classList.add('pcp-table-caption');
+    if (this.figure.captionDiv) { wrap.classList.add('pcp-caption-div'); wrap.dataset.customStyle = this.figure.captionDiv; }
     if (this.figure.blankWarning) {
       wrap.classList.add('pcp-image-blank-warn');
       const warning = doc.createElement('button'); warning.type = 'button';
@@ -654,6 +708,8 @@ class FigureWidget extends WidgetType {
     }
     const caption = doc.createElement(this.figure.rescue ? 'figcaption' : 'span'); caption.className = 'pcp-caption';
     const appearance=this.plugin.appearanceFor(this.file,this.text);
+    if (this.figure.captionDiv && /(?:^|[\s_-])EN(?:$|[\s_-])/i.test(this.figure.captionDiv))
+      caption.style.fontFamily = JSON.stringify(appearance.latinFont || DEFAULTS.latinFont) + ', serif';
     caption.style.textAlign = appearance.align;
     caption.style.fontWeight = appearance.bold ? '600' : '400';
     wrap.append(caption);
@@ -681,7 +737,7 @@ class FigureWidget extends WidgetType {
       if (event.target.closest('a') || event.target.closest('img')) return;
       view.dispatch({selection: {anchor: this.figure.from}, scrollIntoView: true}); view.focus();
     });
-    wrap.title = this.figure.type === 'tbl' ? '选择表名后可复制；点击编辑源码' : '双击图片放大预览；点击图注编辑源码';
+    wrap.title = this.figure.captionDiv ? '点击编辑题注源码' : this.figure.type === 'tbl' ? '选择表名后可复制；点击编辑源码' : '双击图片放大预览；点击图注编辑源码';
     return wrap;
   }
   destroy(dom) { dom._pcpDispose?.(); }
@@ -708,11 +764,15 @@ class FigureGroupWidget extends WidgetType {
 class ReferenceWidget extends WidgetType {
   constructor(reference, prefix) { super(); this.reference = reference; this.prefix = prefix; }
   eq(other) { return other instanceof ReferenceWidget && other.reference.id === this.reference.id &&
-    other.reference.type === this.reference.type && other.reference.number === this.reference.number && other.prefix === this.prefix; }
+    other.reference.type === this.reference.type && other.reference.number === this.reference.number &&
+    !!other.reference.numberOnly === !!this.reference.numberOnly && other.reference.raw === this.reference.raw && other.prefix === this.prefix; }
   toDOM(view) {
     const el = view.dom.ownerDocument.createElement('span'); el.className = 'pcp-reference';
-    el.textContent = this.reference.number == null ? '@' + (this.reference.type || 'fig') + ':' + this.reference.id : numberedLabel(this.prefix,this.reference.number);
-    if (this.reference.number == null) { el.classList.add('pcp-unresolved-citation'); el.title = '未找到图表或公式标签'; }
+    if (this.reference.number == null) {
+      el.textContent = this.reference.raw || ((this.reference.numberOnly ? '[-@' : '@') + (this.reference.type || 'fig') + ':' + this.reference.id
+        + (this.reference.numberOnly ? ']' : ''));
+      el.classList.add('pcp-unresolved-citation'); el.title = '未找到图表或公式标签';
+    } else el.textContent = this.reference.numberOnly ? String(this.reference.number) : numberedLabel(this.prefix, this.reference.number);
     return el;
   }
 }
@@ -759,12 +819,14 @@ function buildDecorations(plugin, state) {
     // Count $$ marks instead of toggling: an inline $$x$$ line must not flip the state.
     // Track fenced code with the same rules as maskExamples so blank lines inside
     // fences are never mistaken for caret paragraph starts.
-    let offset = 0, mathMarks = 0, fence = null, figureIndex = 0, tableIndex = 0;
+    let offset = 0, mathMarks = 0, fence = null, figureIndex = 0, tableIndex = 0, captionIndex = 0;
     for (let i = 0; i < lines.length; i++) {
       while (figureIndex < parsed.figures.length && parsed.figures[figureIndex].to <= offset) figureIndex++;
       while (tableIndex < parsed.tables.length && parsed.tables[tableIndex].to <= offset) tableIndex++;
       const inFigure = parsed.figures[figureIndex]?.from <= offset && offset < parsed.figures[figureIndex].to;
       const inTable = parsed.tables[tableIndex]?.from <= offset && offset < parsed.tables[tableIndex].to;
+      while (captionIndex < parsed.captionDivs.length && parsed.captionDivs[captionIndex].to <= offset) captionIndex++;
+      const inCaptionDiv = parsed.captionDivs[captionIndex]?.from <= offset && offset < parsed.captionDivs[captionIndex].to;
       const line = lines[i].trim(), hasText = !!rawLines[i].trim();
       // content = a real prose line; code lines masked to whitespace have raw text
       // but no masked text and must be skipped entirely.
@@ -777,7 +839,7 @@ function buildDecorations(plugin, state) {
       } else if (fenceMark) fence = fenceMark[1];
       const structural = /^(?:#{1,6}\s|>|[-+*]\s|\d+[.)]\s|\||!\[|!\[\[|\{#|:{1,3}(?:\s|$)|<|\$\$|[-*_]{3,}\s*$)/.test(line);
       if (offset>frontmatterEnd && content && !structural && !inMath && !inFence &&
-        !inFigure && !inTable)
+        !inFigure && !inTable && !inCaptionDiv)
         widgets.push(Decoration.line({class:'pcp-prose-line'}).range(offset));
       // A line starts a paragraph when the previous line is blank (or it is the
       // first line). Blank caret lines only indent when typing there would form
@@ -785,7 +847,7 @@ function buildDecorations(plugin, state) {
       const startsParagraph = i === 0 || !lines[i - 1].trim();
       if (plugin.settings.indentParagraphs && offset > frontmatterEnd && !inMath && !inFence && !structural &&
         (content ? startsParagraph : (startsParagraph && !hasText && i === caretIndex)) &&
-        !inFigure && !inTable) {
+        !inFigure && !inTable && !inCaptionDiv) {
         widgets.push(Decoration.line({class: 'pcp-paragraph-start'}).range(offset));
       }
       offset += lines[i].length + 1;
@@ -828,6 +890,17 @@ function buildDecorations(plugin, state) {
     widgets.push(Decoration.replace({widget: new FigureWidget(plugin,
       {...table, type: 'tbl', rescue: false, tableNumbers: parsed.tableNumbers, eqNumbers: parsed.eqNumbers}, file, text, tablePrefix, parsed.numbers),
       block: true, inclusive: false}).range(table.from, table.to));
+  }
+  // Pandoc fenced caption divs (::: {custom-style="Figure Caption EN"}) render
+  // fences and inner caption as one caption block; the suppressed reference
+  // form resolves to a bare number ("Fig. [-@fig:a]" shows "Fig. 1").
+  if (!plugin.legacy()) for (const div of parsed.captionDivs) {
+    if (touches(div.from, div.to)) continue;
+    widgets.push(Decoration.replace({widget: new FigureWidget(plugin,
+      {from: div.from, to: div.to, caption: text.slice(div.contentFrom, div.contentTo).trim(),
+        src: null, width: null, id: null, number: null, rescue: false, captionDiv: div.style,
+        tableNumbers: parsed.tableNumbers, eqNumbers: parsed.eqNumbers},
+      file, text, prefix, parsed.numbers), block: true, inclusive: false}).range(div.from, div.to));
   }
   if (!plugin.legacy()) for (const equation of parsed.equations) {
     const line = state.doc.lineAt(equation.from);

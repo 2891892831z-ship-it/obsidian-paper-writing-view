@@ -1,6 +1,13 @@
 ---
-date modified: 2026.10.16 16:28:50
+date modified: 2026.10.16 16:46:33
 ---
+
+# 0.12.0 - Paper Writing View
+
+- Adopt PR #1: render bilingual Pandoc caption divs and number-only figure/table/equation references in ordinary Live Preview. Thanks to EdgerHao for the contribution.
+- English captions are authored in Markdown, not automatically translated; EN caption styles use the configured Latin font.
+- Preserve unresolved reference source; handle CRLF and nested caption divs without overlapping replacements; avoid repeated reference-range scans.
+- Lightweight writing continues to skip complex caption rendering and full-document parsing while typing. The separate Word exporter is unchanged.
 
 # 0.11.1 · Paper Writing View
 

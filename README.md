@@ -1,6 +1,6 @@
 ---
 created: 2026-10-13 16:33
-date modified: 2026.10.16 16:28:50
+date modified: 2026.10.16 16:46:33
 tags: [Obsidian, 插件开发, 图注]
 ---
 
@@ -8,7 +8,7 @@ tags: [Obsidian, 插件开发, 图注]
 
 让 Obsidian 的论文写作界面接近 Word 的成稿排版：中文宋体、西文 Times New Roman、段落缩进与两端对齐、紧凑空行、图表公式预览及引用补全。字体、字号、颜色、行距、图片边框和表格外观都能在插件设置中调整。
 
-插件 ID 保持 `paper-caption-preview`，当前版本 **0.11.1**。已有本机版本可直接升级，保留设置。这是显示与写作辅助插件；Word 导出由独立项目 [MD Export Word](https://github.com/2891892831z-ship-it/obsidian-md-export-word) 负责，两者可分别安装。
+插件 ID 保持 `paper-caption-preview`，当前版本 **0.12.0**。已有本机版本可直接升级，保留设置。这是显示与写作辅助插件；Word 导出由独立项目 [MD Export Word](https://github.com/2891892831z-ship-it/obsidian-md-export-word) 负责，两者可分别安装。
 
 ## 通过 BRAT 安装
 
@@ -29,12 +29,29 @@ tags: [Obsidian, 插件开发, 图注]
 - **图片与图注**：Markdown 图片长图注、HTML 真上下标、百分号编码及括号路径、紧邻下一行的图标签、多图并排；统一放大预览和源码入口。图片默认红色虚线边框，可调颜色、线宽、线型和间距。
 - **表格**：单元格水平与垂直居中、长文字换行、宽表滚动、表题编号。
 - **图表公式交叉引用**：识别 `{#fig:id}`、`{#tbl:id}`、`{#eq:id}`；输入 `@fig:`、`@tbl:`、`@eq:` 可搜索当前稿件候选，并用普通半角空格显示“图 1 / 表 1 / 式 1”。
+- **双语题注块**：实时预览识别 `::: {custom-style="Figure Caption EN"}`、`"Table Caption EN"` 等图注/表题 Pandoc 围栏块，隐藏围栏行并按题注样式排版；`Fig. [-@fig:id]` 显示为 `Fig. 3`，正文中的 `[-@fig:id]` 同样只显示编号。
 - **写作辅助**：空行检查、修复预览、按选中项补空行、图表公式导航、缺图及重复标签诊断。日常预览不改正文；只有主动确认修复时才编辑源码，一次撤销可恢复。
 - **虚假上下标检查**：默认在状态栏显示当前稿件的 Unicode 上下标问题数；点击预览转换结果，支持逐处定位、选择修复和全部修复，转换为真正的 HTML 上下标。跳过代码、公式、链接地址、citekey 和图表标签，不猜测普通基线数字；修复可一次撤销。可在设置中关闭提醒。
 - **轻量写作**：自动 / 普通 / 轻量写作三种选择；自动达到约 8 万字符或 60 个图片标记时优先轻量。轻量写作保留字体、行距和原生图片与表格显示，暂停复杂图注、交叉引用显示替换、本插件的全文引用请求及自动全文检查；不在输入或停笔后重建全文。空行和上下标支持手动检查与修复。
 - **稳定编辑**：重复使用已加载的图片，不因普通文字编辑重新载入；未变化的外观不反复触发布局测量。
 
 屏幕字号是写作观感设置，并非精确的 Word 页面、纸张尺寸或打印分页预览。实时预览是主要功能模式；阅读模式支持排版、原生图片边框、居中和表格样式，复杂图注与交叉引用的完整替换主要在实时预览中实现。
+
+## Bilingual captions
+
+English captions must already be written in the Markdown; the plugin does not translate them. In ordinary Live Preview, write the English caption below the image (or table) using a Pandoc custom-style block:
+
+```markdown
+![Chinese caption](image.png){#fig:example}
+
+::: {custom-style="Figure Caption EN"}
+Fig. [-@fig:example] English caption
+:::
+```
+
+The English caption appears below the Chinese caption, with its number synchronized to the same label. Use `Table Caption EN` and `Table [-@tbl:example]` for tables. Click inside a caption to edit its source. English caption styles use the configured Latin font (Times New Roman by default). Missing labels retain their original reference text.
+
+This rendering is available in ordinary Live Preview. Lightweight writing skips these replacements; Reading View does not provide the full caption replacement. This release does not change the separate Word export plugin or translate manuscript content.
 
 ## 大稿件模式
 

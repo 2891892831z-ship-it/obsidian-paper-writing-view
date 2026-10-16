@@ -1,7 +1,7 @@
 {
   "id": "paper-caption-preview",
   "name": "Paper Writing View",
-  "version": "0.11.1",
+  "version": "0.12.0",
   "minAppVersion": "1.5.0",
   "description": "Word 式中英文论文排版、字体与间距设置、图表公式预览和引用补全，保留 Markdown 源码。",
   "author": "早点睡觉",

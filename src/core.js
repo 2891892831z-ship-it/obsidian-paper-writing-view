@@ -61,6 +61,21 @@ function imageAt(text, at) {
   return {from: at, imageTo: cursor + 1, caption, src};
 }
 
+// Sorted, merged spans give logarithmic ownership checks even with many captions.
+function rangeLookup(rows) {
+  const spans=[];
+  for (const row of [...rows].sort((a,b)=>a.from-b.from)) {
+    const previous=spans.at(-1);
+    if(previous && row.from<=previous.to)previous.to=Math.max(previous.to,row.to);
+    else spans.push({from:row.from,to:row.to});
+  }
+  return at=>{
+    let lo=0,hi=spans.length;
+    while(lo<hi){const mid=(lo+hi)>>>1;if(spans[mid].from<=at)lo=mid+1;else hi=mid;}
+    return lo>0 && at<spans[lo-1].to;
+  };
+}
+
 function scanDocument(text) {
   const masked = maskExamples(text);
   const definitions = [], numbers = new Map(), duplicates = new Set();
@@ -123,16 +138,52 @@ function scanDocument(text) {
     const eol = masked.indexOf('\n', eqRegex.lastIndex);
     equations.push({from: lineStart, to: eol < 0 ? masked.length : eol, id: match[1], number: eqNumbers.get(match[1])});
   }
-  const references = [];
-  const refRegex = /@(fig|tbl|eq):([\w:-]+)/g;
-  while ((match = refRegex.exec(masked))) {
-    if (escaped(masked, match.index) || figures.some(f => match.index >= f.from && match.index < f.to)) continue;
-    if (tables.some(t => match.index >= t.from && match.index < t.to)) continue;
-    if (equations.some(e => match.index >= e.from && match.index < e.to)) continue;
-    references.push({from: match.index, to: refRegex.lastIndex, type: match[1], id: match[2],
-      number: (match[1] === 'fig' ? numbers : match[1] === 'tbl' ? tableNumbers : eqNumbers).get(match[2])});
+  // Pandoc fenced divs whose custom-style is a caption style (thesis Word
+  // templates use "Figure Caption EN" / "Table Caption EN"): fences and inner
+  // caption render as one caption block. Bare colon fences close the innermost
+  // open div, so :::: wrappers around ::: divs nest correctly.
+  const captionDivs = [];
+  if (masked.includes(':::')) {
+    const isCaptionStyle = style => style != null && /caption|题注|图题|表题/i.test(style);
+    const customStyle = attrs => {
+      const found = /custom-style\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s}]+))/i.exec(attrs);
+      return found ? String(found[1] ?? found[2] ?? found[3] ?? '') : null;
+    };
+    const stack = [];
+    let offset = 0, mathMarks = 0;
+    for (const line of masked.split('\n')) {
+      const inMath = mathMarks % 2 === 1;
+      mathMarks += (line.match(/\$\$/g) || []).length;
+      const fence = !inMath && !line.includes('$$') && /^ {0,3}(:{3,})[ \t]*(.*)$/.exec(line.replace(/\r$/, ''));
+      if (fence && !fence[2].trim() && stack.length && fence[1].length >= stack.at(-1).marks) {
+        const open = stack.pop();
+        // Nested div syntax cannot be represented by a flat inline caption widget.
+        // Render leaf captions only; retain other containers as source.
+        if (isCaptionStyle(open.style) && !open.hasChild) captionDivs.push({from: open.from, to: offset + line.length,
+          contentFrom: open.contentFrom, contentTo: offset, style: open.style});
+      } else if (fence && fence[2].trim()) {
+        if (stack.length) stack.at(-1).hasChild = true;
+        stack.push({from: offset, marks: fence[1].length, style: customStyle(fence[2]), contentFrom: offset + line.length + 1});
+      }
+      offset += line.length + 1;
+    }
+    captionDivs.sort((a,b) => a.from-b.from);
   }
-  return {figures, tables, equations, numbers, tableNumbers, eqNumbers, references, duplicates};
+  const inCaptionDiv = rangeLookup(captionDivs);
+  for (const list of [figures, tables, equations])
+    for (let i = list.length - 1; i >= 0; i--) if (inCaptionDiv(list[i].from)) list.splice(i, 1);
+  const owns = rangeLookup([...captionDivs, ...figures, ...tables, ...equations]);
+  const references = [];
+  const numberMap = type => type === 'fig' ? numbers : type === 'tbl' ? tableNumbers : eqNumbers;
+  // One token pass avoids scanning all earlier references for every new reference.
+  const refRegex = /\[-@(fig|tbl|eq):([\w:-]+)\]|(-?)@(fig|tbl|eq):([\w:-]+)/g;
+  while ((match = refRegex.exec(masked))) {
+    if (escaped(masked, match.index) || owns(match.index)) continue;
+    const type = match[1] || match[4], id = match[2] || match[5];
+    references.push({from:match.index, to:refRegex.lastIndex, type, id, raw:match[0],
+      number:numberMap(type).get(id), numberOnly:!!match[1] || match[3] === '-'});
+  }
+  return {figures, tables, equations, numbers, tableNumbers, eqNumbers, references, duplicates, captionDivs};
 }
 
 function citationMap(cache) {
