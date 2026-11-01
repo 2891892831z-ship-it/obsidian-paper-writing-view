@@ -331,7 +331,7 @@ function fakeScriptViolations(text) {
     .replace(/(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, blank)
     .replace(/<sup\b[^>]*>[\s\S]*?<\/sup>|<sub\b[^>]*>[\s\S]*?<\/sub>/gi, blank)
     .replace(/\[\[[^\r\n]*?\]\]|\{[^{}\r\n]*\}|<[^>\r\n]*>/g, blank)
-    .replace(/\[[^\]\r\n]*@[^\]\r\n]*\]|@[^\s\[\]{}<>;,]+/g, blank)
+    .replace(/\[[^\[\]@\r\n]*@[^\[\]\r\n]*\]|@[^\s\[\]{}<>;,]+/g, blank)
     .replace(/^ {0,3}\[[^\]\r\n]+\]:[^\r\n]*/gm, blank);
   // Link/image destinations may contain nested parentheses; keep visible captions.
   for (let i = 0; i < masked.length; i++) {

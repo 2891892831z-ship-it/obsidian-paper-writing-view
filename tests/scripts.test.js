@@ -14,6 +14,10 @@ test('detects numeric, signed and letter scripts in prose, headings, captions an
   assert(result.includes('![CO<sub>2</sub>](a.png){#fig:a}'));
   assert.equal(scan(result).length,0);
 });
+test('still checks caption text that wraps a bracketed citation', () => {
+  const text = '![CO₂ 与 m³ 封存现状 [@kelemen₂]](a.png){#fig:a}';
+  assert.deepEqual(scan(text).map(i=>i.original), ['₂','³']);
+});
 test('protects metadata, code, comments, math, citation keys, labels and destinations', () => {
   const text = '---\ntitle: CO₂\n---\n```md\nCO₂\n```\n`R²`\n    CO₂\n<!-- CO₂ --> %% CO₂ %%\n'+
     '$x²$ $$\nx₂\n$$\n\\(x²\\) \\[x₂\\]\n[@key₂; @other²] @key₂\n'+
