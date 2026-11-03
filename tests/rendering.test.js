@@ -588,3 +588,26 @@ test('missing blank lines before images and headings get warning decorations', a
   const ok=await fixture('正常。\n\n![好图](b.png){#fig:b}',{settings:{blankLineWarnings:true, indentParagraphs:false},selection:{ranges:[]}});
   assert.equal(ok.ranges.filter(r=>r.class==='pcp-blank-warn').length,0);
 });
+
+
+test('bilingual table title renders Chinese then English above native table without modifying source', async()=>{
+ const text=': 中文表题 {#tbl:t}\n\n| A | B |\n| --- | --- |\n| x | y |\n\n::: {custom-style="Table Caption EN"}\nTable [-@tbl:t] English title\n:::\n\n注：仍在表下。';
+ const {ranges,view,plugin}=await fixture(text);
+ const group=ranges.find(r=>r.widget?.constructor.name==='TableTitleGroupWidget');
+ assert(group);assert.equal(group.from,0);
+ const dom=group.widget.toDOM(view);
+ assert.equal(dom.className,'pcp-table-title-group');assert.equal(dom.style.flexDirection,'column');
+ assert.equal(dom.children.length,2);
+ assert.equal(group.widget.items[0].figure.type,'tbl');
+ assert.match(group.widget.items[1].figure.caption,/English title/);
+ const old=text.indexOf(':::');
+ assert(ranges.some(r=>r.from===old && !r.widget));
+ assert(plugin.ownsRange(text,old,old+3),'legacy renderer must leave owned caption fences alone');
+});
+
+test('unmatched English table caption stays at its source position',async()=>{
+ const text=': 中文表题 {#tbl:t}\n\n| A | B |\n| --- | --- |\n| x | y |\n\n::: {custom-style="Table Caption EN"}\nTable [-@tbl:other] Wrong title\n:::';
+ const {ranges}=await fixture(text);
+ assert(!ranges.some(r=>r.widget?.constructor.name==='TableTitleGroupWidget'));
+ assert(ranges.some(r=>r.from===text.indexOf(':::') && r.widget));
+});

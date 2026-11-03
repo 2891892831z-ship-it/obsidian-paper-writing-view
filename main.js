@@ -1027,6 +1027,16 @@ class FigureGroupWidget extends WidgetType {
   ignoreEvent() { return true; }
 }
 
+class TableTitleGroupWidget extends FigureGroupWidget {
+  eq(other) { return other instanceof TableTitleGroupWidget && super.eq(other); }
+  toDOM(view) {
+    const dom = super.toDOM(view);
+    dom.className = 'pcp-table-title-group';
+    dom.style.display = 'flex'; dom.style.flexDirection = 'column';
+    return dom;
+  }
+}
+
 class ReferenceWidget extends WidgetType {
   constructor(reference, prefix) { super(); this.reference = reference; this.prefix = prefix; }
   eq(other) { return other instanceof ReferenceWidget && other.reference.id === this.reference.id &&
@@ -1168,17 +1178,32 @@ function buildDecorations(plugin, state) {
     const widget = items.length === 1 ? items[0] : new FigureGroupWidget(items,captions);
     widgets.push(Decoration.replace({widget, block: true, inclusive: true}).range(from, to));
   }
-  if (!plugin.legacy()) for (const table of parsed.tables) {
+  for (const table of parsed.tables) {
     const line = state.doc.lineAt(table.from);
-    if (touches(line.from, line.to)) continue;
-    widgets.push(Decoration.replace({widget: new FigureWidget(plugin,
-      {...table, type: 'tbl', rescue: false, tableNumbers: parsed.tableNumbers, eqNumbers: parsed.eqNumbers}, file, text, tablePrefix, parsed.numbers),
-      block: true, inclusive: false}).range(table.from, table.to));
+    let english = null;
+    try {
+      english = captionTranslationPlan(text, {...table, type:'tbl'}, 'association',
+        {parsed, targets:captionTargets(text,parsed)}).existing;
+    } catch { /* Keep unmatched or incomplete caption source visible. */ }
+    if (touches(line.from, line.to) || (english && touches(english.from, english.to))) continue;
+    const chineseWidget = new FigureWidget(plugin,
+      {...table, type: 'tbl', rescue: false, tableNumbers: parsed.tableNumbers, eqNumbers: parsed.eqNumbers}, file, text, tablePrefix, parsed.numbers);
+    let widget = chineseWidget;
+    if (english) {
+      const englishWidget = new FigureWidget(plugin,
+        {from:english.from,to:english.to,caption:english.content,src:null,id:null,number:null,
+          rescue:false,captionDiv:english.style,tableNumbers:parsed.tableNumbers,eqNumbers:parsed.eqNumbers},
+        file,text,tablePrefix,parsed.numbers);
+      widget = new TableTitleGroupWidget([chineseWidget, englishWidget]);
+      groupedCaptionDivs.add(english.from);
+      widgets.push(Decoration.replace({block:true}).range(english.from,english.to));
+    }
+    widgets.push(Decoration.replace({widget, block:true, inclusive:false}).range(table.from,table.to));
   }
   // Pandoc fenced caption divs (::: {custom-style="Figure Caption EN"}) render
   // fences and inner caption as one caption block; the suppressed reference
   // form resolves to a bare number ("Fig. [-@fig:a]" shows "Fig. 1").
-  if (!plugin.legacy()) for (const div of parsed.captionDivs) {
+  for (const div of parsed.captionDivs) {
     if (groupedCaptionDivs.has(div.from)) continue;
     if (touches(div.from, div.to)) continue;
     widgets.push(Decoration.replace({widget: new FigureWidget(plugin,
@@ -2159,7 +2184,7 @@ module.exports = class PaperCaptionPreview extends Plugin {
     draw();modal.open();return modal;
   }
   ownsRange(text, start, end) {
-    if (this.rangeText !== text) { this.rangeText = text; this.rangeFigures = scanDocument(text).figures; }
+    if (this.rangeText !== text) { this.rangeText = text; const parsed = scanDocument(text); this.rangeFigures = [...parsed.figures, ...parsed.tables, ...parsed.captionDivs]; }
     return this.rangeFigures.some(figure => start >= figure.from && end <= figure.to);
   }
   conflict() { const legacy = this.legacy(); return !!legacy && legacy.paperCaptionCompatibility !== 1; }
